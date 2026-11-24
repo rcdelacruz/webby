@@ -1,0 +1,155 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Webby</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --strip: #e4e4e1; --bar: #f6f6f4; --fg: #1d1d1f; --muted: #6e6e73;
+  --field: #fff; --line: #cfcfcb; --hover: rgba(0,0,0,.07); --accent: #0a6cff;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --strip: #1c1c1e; --bar: #2c2c2f; --fg: #f2f2f2; --muted: #98989d;
+    --field: #1c1c1e; --line: #48484c; --hover: rgba(255,255,255,.1); --accent: #4c9bff;
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; overflow: hidden; }
+body {
+  font: 13px/1 system-ui, -apple-system, "Segoe UI", sans-serif; color: var(--fg);
+  background: var(--strip); user-select: none; -webkit-user-select: none; cursor: default;
+  display: flex; flex-direction: column;
+}
+button { font: inherit; color: inherit; background: none; border: 0; padding: 0; border-radius: 6px; display: grid; place-items: center; }
+button:hover:not(:disabled) { background: var(--hover); }
+button:disabled { opacity: .3; }
+svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+
+#strip { height: 38px; display: flex; align-items: flex-end; padding: 0 8px; gap: 2px; }
+#tabs { display: flex; min-width: 0; gap: 2px; height: 32px; }
+.tab {
+  flex: 0 1 220px; min-width: 44px; display: flex; align-items: center; gap: 6px;
+  padding: 0 6px 0 12px; border-radius: 8px 8px 0 0; color: var(--muted); position: relative;
+}
+.tab:hover { background: var(--hover); }
+.tab.active { background: var(--bar); color: var(--fg); }
+.tab .title { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; line-height: 32px; }
+.tab .spinner { flex: none; width: 10px; height: 10px; border-radius: 50%; border: 1.6px solid var(--accent); border-right-color: transparent; animation: spin .7s linear infinite; }
+.tab .close { flex: none; width: 20px; height: 20px; opacity: 0; }
+.tab .close svg { width: 10px; height: 10px; }
+.tab:hover .close, .tab.active .close { opacity: 1; }
+@keyframes spin { to { transform: rotate(360deg); } }
+#new { width: 28px; height: 28px; margin: 0 0 2px 2px; flex: none; }
+
+#bar { height: 46px; background: var(--bar); display: flex; align-items: center; gap: 4px; padding: 0 10px; position: relative; border-bottom: 1px solid var(--line); }
+#bar button { width: 30px; height: 30px; flex: none; }
+#field {
+  flex: 1; height: 30px; margin-left: 6px; display: flex; align-items: center; gap: 6px; padding: 0 10px;
+  background: var(--field); border: 1px solid var(--line); border-radius: 8px;
+}
+#field:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent); }
+#lock { width: 12px; height: 12px; color: var(--muted); flex: none; visibility: hidden; }
+#lock.on { visibility: visible; }
+#address { flex: 1; min-width: 0; font: inherit; color: inherit; background: none; border: 0; outline: 0; user-select: text; -webkit-user-select: text; }
+#progress { position: absolute; left: 0; bottom: -1px; height: 2px; width: 0; background: var(--accent); opacity: 0; transition: width .2s ease-out, opacity .3s .2s; }
+#progress.on { opacity: 1; transition: width .2s ease-out; }
+</style>
+</head>
+<body>
+<div id="strip">
+  <div id="tabs"></div>
+  <button id="new" title="New tab"><svg viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"/></svg></button>
+</div>
+<div id="bar">
+  <button id="back" title="Back" disabled><svg viewBox="0 0 16 16"><path d="M10 3L5 8l5 5"/></svg></button>
+  <button id="forward" title="Forward" disabled><svg viewBox="0 0 16 16"><path d="M6 3l5 5-5 5"/></svg></button>
+  <button id="reload" title="Reload"><svg viewBox="0 0 16 16"><path id="reload-icon" d=""/></svg></button>
+  <div id="field">
+    <svg id="lock" viewBox="0 0 12 12"><rect x="2.5" y="5.5" width="7" height="5" rx="1"/><path d="M4 5.5V4a2 2 0 014 0v1.5"/></svg>
+    <input id="address" type="text" placeholder="Search or enter address" spellcheck="false" autocomplete="off" autocapitalize="off">
+  </div>
+  <div id="progress"></div>
+</div>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const post = msg => window.webkit.messageHandlers.webby.postMessage(JSON.stringify(msg));
+const RELOAD = "M13 8a5 5 0 11-1.5-3.5M13 2.5v3h-3", STOP = "M4 4l8 8M12 4l-8 8";
+const CLOSE = '<svg viewBox="0 0 10 10"><path d="M2 2l6 6M8 2l-6 6"/></svg>';
+
+let state = { tabs: [], active: null, canBack: false, canForward: false };
+let shownUrl = null;   // URL the address field was last synced to
+let shownTab = null;
+const address = $("address");
+const activeTab = () => state.tabs.find(t => t.id === state.active);
+
+function renderTabs() {
+  const box = $("tabs");
+  box.textContent = "";
+  for (const tab of state.tabs) {
+    const el = document.createElement("div");
+    el.className = "tab" + (tab.id === state.active ? " active" : "");
+    el.title = tab.title || tab.url;
+    if (tab.loading) el.appendChild(Object.assign(document.createElement("span"), { className: "spinner" }));
+    el.appendChild(Object.assign(document.createElement("span"), { className: "title", textContent: tab.title || tab.url || "Loading…" }));
+    const close = Object.assign(document.createElement("button"), { className: "close", title: "Close tab", innerHTML: CLOSE });
+    close.addEventListener("mousedown", e => e.stopPropagation());
+    close.addEventListener("click", () => post({ cmd: "close_tab", id: tab.id }));
+    el.appendChild(close);
+    el.addEventListener("mousedown", e => {
+      if (e.button === 0) post({ cmd: "select_tab", id: tab.id });
+      if (e.button === 1) { e.preventDefault(); post({ cmd: "close_tab", id: tab.id }); }
+    });
+    box.appendChild(el);
+  }
+}
+
+window.webby = {
+  update(next) {
+    state = next;
+    renderTabs();
+    const tab = activeTab() || { url: "", loading: false, progress: 0 };
+    $("back").disabled = !state.canBack;
+    $("forward").disabled = !state.canForward;
+    $("reload").title = tab.loading ? "Stop" : "Reload";
+    $("reload-icon").setAttribute("d", tab.loading ? STOP : RELOAD);
+    // Never clobber what the user is typing, unless the page moved on.
+    if (tab.url !== shownUrl || state.active !== shownTab) {
+      shownUrl = tab.url;
+      shownTab = state.active;
+      address.value = tab.url;
+      if (document.activeElement === address) address.select();
+    }
+    $("lock").classList.toggle("on", tab.url.startsWith("https://"));
+    const bar = $("progress");
+    bar.classList.toggle("on", tab.loading);
+    bar.style.width = (tab.loading ? Math.max(8, tab.progress * 100) : 100) + "%";
+    if (!tab.loading) setTimeout(() => { if (!bar.classList.contains("on")) bar.style.width = "0"; }, 500);
+  },
+  focusAddress() {
+    address.focus();
+    address.select();
+  },
+};
+
+$("new").addEventListener("click", () => post({ cmd: "new_tab" }));
+$("back").addEventListener("click", () => post({ cmd: "back" }));
+$("forward").addEventListener("click", () => post({ cmd: "forward" }));
+$("reload").addEventListener("click", () => post({ cmd: (activeTab() || {}).loading ? "stop" : "reload" }));
+address.addEventListener("focus", () => setTimeout(() => address.select()));
+address.addEventListener("keydown", e => {
+  if (e.key === "Enter") {
+    post({ cmd: "navigate", input: address.value });
+  } else if (e.key === "Escape") {
+    address.value = shownUrl || "";
+    post({ cmd: "focus_page" });
+  }
+});
+document.addEventListener("contextmenu", e => { if (e.target !== address) e.preventDefault(); });
+document.addEventListener("dragstart", e => e.preventDefault());
+post({ cmd: "ready" });
+</script>
+</body>
+</html>
