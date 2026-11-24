@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>webby — the WebKit browser for Windows, macOS and Linux</title>
+<meta name="description" content="webby is a small open-source web browser written in Rust. It renders with WebKit, the engine behind Safari, on Windows, macOS and Linux.">
+<meta property="og:title" content="webby — the WebKit browser for every desktop">
+<meta property="og:description" content="A small open-source browser written in Rust. Safari's engine on Windows, macOS and Linux.">
+<meta property="og:type" content="website">
+<meta property="og:image" content="assets/screenshot.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="theme-color" content="#2a4bd8">
+<link rel="icon" href="assets/favicon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="assets/icon.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="nav">
+  <div class="wrap nav-row">
+    <a class="brand" href="#top" aria-label="webby home"><img src="assets/wordmark.svg" alt="webby" width="104" height="35"></a>
+    <nav class="nav-links" aria-label="Main">
+      <a href="#features">Features</a>
+      <a href="#platforms">Download</a>
+      <a href="#how">How it works</a>
+      <a href="#open-source">Open source</a>
+    </nav>
+    <a class="btn btn-ghost btn-small" href="https://github.com/rcdelacruz/webby" rel="noopener">
+      <svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M8 .2a8 8 0 00-2.5 15.6c.4.1.5-.2.5-.4v-1.4c-2.2.5-2.700-1-2.700-1-.4-.9-.9-1.200-.9-1.200-.7-.5.1-.5.1-.5.8.1 1.200.8 1.200.8.7 1.200 1.900.9 2.300.7.1-.5.3-.9.5-1.100-1.800-.2-3.600-.9-3.600-4 0-.9.300-1.600.8-2.100-.1-.2-.4-1 .1-2.100 0 0 .7-.2 2.200.8a7.600 7.600 0 014 0c1.500-1 2.200-.8 2.200-.8.4 1.100.2 1.900.1 2.100.5.6.8 1.300.8 2.100 0 3.100-1.900 3.700-3.700 3.900.3.300.6.800.6 1.500v2.200c0 .2.100.5.600.4A8 8 0 008 .2z"/></svg>
+      GitHub
+    </a>
+  </div>
+</header>
+
+<main id="top">
+
+  <section class="hero">
+    <div class="glow" aria-hidden="true"></div>
+    <div class="wrap hero-inner">
+      <p class="pill"><span class="dot"></span> Open source · v<span data-version>0.1.0</span> · early preview</p>
+      <h1>The web on WebKit.<br><span class="grad">On every desktop.</span></h1>
+      <p class="lede">webby is a small browser written in Rust. It brings the engine behind Safari to Windows, and runs on macOS and Linux too. No Chromium inside.</p>
+      <div class="cta">
+        <a class="btn btn-primary" data-download href="https://github.com/rcdelacruz/webby/releases/latest" rel="noopener">
+          <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2v8m0 0l-3.500-3.500M8 10l3.500-3.500M3 13h10" fill="none" stroke="currentColor" stroke-width="1.800" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          <span data-download-label>Download webby</span>
+        </a>
+        <a class="btn btn-ghost" href="https://github.com/rcdelacruz/webby" rel="noopener">View the source</a>
+      </div>
+      <p class="fine">Free. Windows 10+, macOS 11+, Debian and Ubuntu. <a href="#platforms">All downloads</a></p>
+    </div>
+
+    <div class="wrap">
+      <figure class="window">
+        <div class="window-bar" aria-hidden="true"><i></i><i></i><i></i></div>
+        <img src="assets/screenshot.png" alt="webby showing its start page with a search box and frequently visited sites" width="1200" height="800">
+      </figure>
+    </div>
+  </section>
+
+  <section class="strip" aria-label="At a glance">
+    <div class="wrap stats">
+      <div><b>1</b><span>engine everywhere: WebKit</span></div>
+      <div><b>3</b><span>desktop platforms</span></div>
+      <div><b>~2k</b><span>lines of Rust you can read in an afternoon</span></div>
+      <div><b>0</b><span>telemetry, accounts or ads</span></div>
+    </div>
+  </section>
+
+  <section id="features" class="section">
+    <div class="wrap">
+      <p class="eyebrow">Features</p>
+      <h2>Everything you need to browse. Nothing you have to turn off.</h2>
+      <div class="grid">
+        <article class="card">
+          <div class="icon"><svg viewBox="0 0 24 24"><path d="M3 9a2 2 0 012-2h4l2 2h8a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2z"/></svg></div>
+          <h3>Tabs that behave</h3>
+          <p>Open, close and switch tabs with the mouse or the keyboard. Pop-ups and new-window links open as a tab right next to the page that asked for them.</p>
+        </article>
+        <article class="card">
+          <div class="icon"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="M20 20l-4.500-4.500"/></svg></div>
+          <h3>One smart address bar</h3>
+          <p>Type a link, a bare site name like <code>example.com</code>, or just what you are looking for. webby works out which, and searches with DuckDuckGo.</p>
+        </article>
+        <article class="card">
+          <div class="icon"><svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 108-8"/><path d="M4 5v4h4"/><path d="M12 8v4l3 2"/></svg></div>
+          <h3>Picks up where you left off</h3>
+          <p>Your tabs come back when you reopen webby, and the start page keeps the sites you visit most one click away.</p>
+        </article>
+        <article class="card">
+          <div class="icon"><svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 100 18 7 7 0 010-18z"/></svg></div>
+          <h3>Light and dark</h3>
+          <p>The whole browser, start page included, follows your system appearance without a setting to hunt for.</p>
+        </article>
+        <article class="card">
+          <div class="icon"><svg viewBox="0 0 24 24"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M8 14h8"/></svg></div>
+          <h3>Keyboard first</h3>
+          <p>New tab, close tab, jump to the address bar, reload, back, forward and tab switching all have the shortcuts your hands already know.</p>
+        </article>
+        <article class="card">
+          <div class="icon"><svg viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.500-3 8-7 10-4-2-7-5.500-7-10V6z"/><path d="M9 12l2 2 4-4"/></svg></div>
+          <h3>Yours, and only yours</h3>
+          <p>No sign-in, no telemetry, no sponsored tiles. History and your open tabs are plain files on your own disk.</p>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section id="platforms" class="section alt">
+    <div class="wrap">
+      <p class="eyebrow">Download</p>
+      <h2>The same engine, wherever you work.</h2>
+      <p class="sub">Most browsers are Chromium underneath. webby uses WebKit on all three systems, so you can use and test the engine that powers Safari without owning a Mac.</p>
+      <div class="platforms">
+        <article class="platform" data-os="windows">
+          <div class="os"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M9 20h6M12 16v4"/></svg></div>
+          <h3>Windows</h3>
+          <p>WebKit's own Windows port, bundled in the installer. No WebView2, no Chromium. Installs for your user without an administrator prompt.</p>
+          <a class="btn btn-primary btn-block" data-asset="windows" href="https://github.com/rcdelacruz/webby/releases/latest" rel="noopener">Download .exe</a>
+          <small>Windows 10 and 11, 64-bit</small>
+        </article>
+        <article class="platform" data-os="macos">
+          <div class="os"><svg viewBox="0 0 24 24"><path d="M5 6a2 2 0 012-2h10a2 2 0 012 2v9H5z"/><path d="M3 18h18"/></svg></div>
+          <h3>macOS</h3>
+          <p>Runs on the system WebKit, the very engine Safari uses, so pages look and behave exactly as they do there.</p>
+          <a class="btn btn-primary btn-block" data-asset="macos" href="https://github.com/rcdelacruz/webby/releases/latest" rel="noopener">Download .dmg</a>
+          <small>macOS 11 or later, Apple silicon and Intel</small>
+        </article>
+        <article class="platform" data-os="linux">
+          <div class="os"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9l3 3-3 3M12 15h5"/></svg></div>
+          <h3>Linux</h3>
+          <p>Built on WebKitGTK and GTK 4, so it feels at home on a modern desktop and uses the WebKit your distribution keeps patched.</p>
+          <a class="btn btn-primary btn-block" data-asset="linux" href="https://github.com/rcdelacruz/webby/releases/latest" rel="noopener">Download .deb</a>
+          <small>Debian and Ubuntu, 64-bit</small>
+        </article>
+      </div>
+      <p class="note"><strong>Heads up:</strong> webby is an early preview and the installers are not code signed yet. Windows SmartScreen and macOS Gatekeeper will ask you to confirm the first launch. The Linux build is the most tested; Windows and macOS are newer.</p>
+    </div>
+  </section>
+
+  <section id="how" class="section">
+    <div class="wrap split">
+      <div>
+        <p class="eyebrow">How it works</p>
+        <h2>One small core. Three thin shells.</h2>
+        <p class="sub">All of the browser's behaviour lives in a platform-independent Rust core: tabs, the address bar, history and session restore. Each system adds only a thin layer that opens windows and hosts its native WebKit.</p>
+        <ul class="checks">
+          <li>The toolbar is one HTML document shared by every platform.</li>
+          <li>Web pages can never reach the browser's controls: only the toolbar has that channel.</li>
+          <li>The core is covered by unit tests and has no platform code at all.</li>
+        </ul>
+        <a class="link" href="https://github.com/rcdelacruz/webby#how-it-works" rel="noopener">Read the architecture notes →</a>
+      </div>
+      <div class="diagram" role="img" aria-label="Diagram: the shared Rust core connects through one interface to three platform shells, each using its native WebKit.">
+        <div class="node core"><b>webby core</b><span>tabs · address bar · history · session</span></div>
+        <div class="wire"></div>
+        <div class="shells">
+          <div class="node"><b>Windows</b><span>WebKit2.dll</span></div>
+          <div class="node"><b>macOS</b><span>System WebKit</span></div>
+          <div class="node"><b>Linux</b><span>WebKitGTK</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="open-source" class="section alt">
+    <div class="wrap">
+      <p class="eyebrow">Open source</p>
+      <h2>Built in the open. Small enough to understand.</h2>
+      <p class="sub">webby is developed on GitHub. Read the code, build it yourself, report what breaks, or pick something from the roadmap.</p>
+      <div class="oss">
+        <div class="card roadmap">
+          <h3>On the roadmap</h3>
+          <ul>
+            <li>Downloads and bookmarks</li>
+            <li>Find in page and a history view</li>
+            <li>Private windows</li>
+            <li>Permission prompts for camera, location and notifications</li>
+            <li>Content blocking and per-site zoom</li>
+            <li>Signed installers</li>
+          </ul>
+        </div>
+        <div class="card build">
+          <h3>Build it yourself</h3>
+          <pre><code>git clone https://github.com/rcdelacruz/webby
+cd webby
+cargo run --release</code></pre>
+          <p>You need Rust 1.88 or newer. On Linux, install GTK 4 and WebKitGTK 6.0 first; on Windows, one script fetches WebKit. The README has the details.</p>
+          <div class="cta left">
+            <a class="btn btn-primary" href="https://github.com/rcdelacruz/webby" rel="noopener">Star on GitHub</a>
+            <a class="btn btn-ghost" href="https://github.com/rcdelacruz/webby/issues" rel="noopener">Report an issue</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="final">
+    <div class="wrap">
+      <h2>Try a different engine.</h2>
+      <p>Free, open source, and under a megabyte on Linux.</p>
+      <a class="btn btn-light" data-download href="https://github.com/rcdelacruz/webby/releases/latest" rel="noopener"><span data-download-label>Download webby</span></a>
+    </div>
+  </section>
+
+</main>
+
+<footer class="footer">
+  <div class="wrap footer-row">
+    <img src="assets/wordmark.svg" alt="webby" width="84" height="28">
+    <nav aria-label="Footer">
+      <a href="https://github.com/rcdelacruz/webby" rel="noopener">GitHub</a>
+      <a href="https://github.com/rcdelacruz/webby/releases" rel="noopener">Releases</a>
+      <a href="https://github.com/rcdelacruz/webby/issues" rel="noopener">Issues</a>
+    </nav>
+    <p>WebKit is a trademark of Apple Inc. webby is an independent project and is not affiliated with Apple.</p>
+  </div>
+</footer>
+
+<script src="main.js" defer></script>
+</body>
+</html>
