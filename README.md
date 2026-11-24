@@ -22,8 +22,10 @@ first time:
 
 - **Windows:** SmartScreen shows "Windows protected your PC". Choose
   *More info*, then *Run anyway*.
-- **macOS:** right-click webby in Applications and choose *Open*, then
-  *Open* again.
+- **macOS:** the first launch shows "Apple could not verify webby is free
+  of malware". Click *Done*, open *System Settings → Privacy & Security*,
+  scroll to *Security* and click *Open Anyway*. Or run
+  `xattr -dr com.apple.quarantine /Applications/webby.app` in Terminal.
 
 ## Status
 
