@@ -65,13 +65,12 @@ struct View {
 impl View {
     /// Create a view as a child of `parent`. Boxed so the address handed to
     /// WebKit as callback context stays put.
-    unsafe fn new(id: TabId, configuration: wk::Ref, parent: HWND, scale: f64) -> Box<View> {
+    unsafe fn new(id: TabId, configuration: wk::Ref, parent: HWND) -> Box<View> {
         let api = wk::api();
         let empty = RECT { left: 0, top: 0, right: 0, bottom: 0 };
         let view = (api.WKViewCreate)(empty, configuration, parent);
         (api.WKViewSetIsInWindow)(view, true);
         let page = (api.WKViewGetPage)(view);
-        (api.WKPageSetCustomBackingScaleFactor)(page, scale);
         Box::new(View { id, view, page, hwnd: (api.WKViewGetWindow)(view), loading: Cell::new(false) })
     }
 
@@ -147,7 +146,6 @@ unsafe extern "C" fn on_script_message(message: wk::Ref, reply: wk::Ref, _contex
 
 struct WinShell {
     window: HWND,
-    scale: f64,
     /// Shared by every content view: process pool, settings, site data.
     configuration: wk::Ref,
     chrome: Box<View>,
@@ -164,7 +162,7 @@ impl Shell for WinShell {
     fn create_view(&mut self, id: TabId) {
         let api = wk::api();
         unsafe {
-            let view = View::new(id, self.configuration, self.window, self.scale);
+            let view = View::new(id, self.configuration, self.window);
             ShowWindow(view.hwnd, SW_HIDE);
             let info = &*view as *const View as *const c_void;
 
@@ -265,6 +263,14 @@ impl Shell for WinShell {
     }
 }
 
+/// The chrome's height in physical pixels at `dpi`. WebKit scales each
+/// view by the window's real DPI (fractional scales included) for both
+/// painting and input, so the layout must use that same factor and must
+/// not override the page's backing scale.
+fn chrome_height(dpi: u32) -> i32 {
+    (CHROME_HEIGHT as f64 * dpi as f64 / 96.0).round() as i32
+}
+
 /// Stack the chrome above the active content view, filling the window.
 unsafe fn apply_layout(window: HWND) {
     let layout = LAYOUT.get();
@@ -282,6 +288,18 @@ unsafe fn apply_layout(window: HWND) {
 unsafe extern "system" fn window_proc(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match message {
         WM_SIZE => {
+            apply_layout(window);
+            0
+        }
+        // Moved to a monitor with a different scale: take the size Windows
+        // suggests and lay out again for the new DPI.
+        WM_DPICHANGED => {
+            let mut layout = LAYOUT.get();
+            layout.chrome_height = chrome_height((wparam >> 16) as u32 & 0xffff);
+            LAYOUT.set(layout);
+            let suggested = &*(lparam as *const RECT);
+            let (width, height) = (suggested.right - suggested.left, suggested.bottom - suggested.top);
+            SetWindowPos(window, null_mut(), suggested.left, suggested.top, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
             apply_layout(window);
             0
         }
@@ -378,8 +396,6 @@ pub fn run(browser: Browser, _profile: Option<PathBuf>) {
         if window.is_null() {
             fatal("webby could not create its window.");
         }
-        // WebKit renders best at whole-number scale factors.
-        let scale = (GetDpiForWindow(window) as f64 / 96.0).round().max(1.0);
 
         let context = (api.WKContextCreateWithConfiguration)(wk::Owned((api.WKContextConfigurationCreate)()).0);
         let preferences = (api.WKPreferencesCreate)();
@@ -398,11 +414,11 @@ pub fn run(browser: Browser, _profile: Option<PathBuf>) {
         let messages = wk::Owned((api.WKUserContentControllerCreate)());
         (api.WKUserContentControllerAddScriptMessageHandler)(messages.0, wk::string(MESSAGE_HANDLER).0, on_script_message, null());
         (api.WKPageConfigurationSetUserContentController)(chrome_configuration.0, messages.0);
-        let chrome = View::new(0, chrome_configuration.0, window, scale);
+        let chrome = View::new(0, chrome_configuration.0, window);
 
-        LAYOUT.set(Layout { chrome: chrome.hwnd, active: null_mut(), chrome_height: (CHROME_HEIGHT as f64 * scale) as i32 });
+        LAYOUT.set(Layout { chrome: chrome.hwnd, active: null_mut(), chrome_height: chrome_height(GetDpiForWindow(window)) });
         let chrome_page = chrome.page;
-        let shell = WinShell { window, scale, configuration: new_configuration(), chrome, views: HashMap::new() };
+        let shell = WinShell { window, configuration: new_configuration(), chrome, views: HashMap::new() };
         RUNTIME.with(|r| *r.borrow_mut() = Some(Rc::new(Runtime::new(browser, shell))));
 
         ShowWindow(window, SW_SHOWDEFAULT);

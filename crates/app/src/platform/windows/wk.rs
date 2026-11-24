@@ -131,7 +131,6 @@ webkit_api! {
     fn WKPageCopyActiveURL(Ref) -> Ref;
     fn WKPageGetEstimatedProgress(Ref) -> f64;
     fn WKPageClose(Ref);
-    fn WKPageSetCustomBackingScaleFactor(Ref, f64);
     fn WKPageSetPageStateClient(Ref, *mut ClientBase);
     fn WKPageSetPageUIClient(Ref, *const ClientBase);
     fn WKPageEvaluateJavaScriptInMainFrame(Ref, Ref, *mut c_void, Option<EvaluateCallback>);

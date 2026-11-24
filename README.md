@@ -191,7 +191,6 @@ caused it.
   Windows
 - Per-site zoom and content blocking
 - Code signing, and an icon embedded in the Windows executable
-- On Windows, the display scale is read once at startup
 
 ## License
 
