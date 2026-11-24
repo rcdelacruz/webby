@@ -18,7 +18,7 @@ use webby_core::{Browser, CHROME_HEIGHT, CHROME_HTML, Event, MESSAGE_HANDLER, Ru
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Ole::OleInitialize;
-use windows_sys::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, GetDpiForWindow, SetProcessDpiAwarenessContext};
+use windows_sys::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_UNAWARE, GetDpiForWindow, SetProcessDpiAwarenessContext};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, SetFocus, VK_CONTROL, VK_F5, VK_LEFT, VK_MENU, VK_NEXT, VK_PRIOR, VK_RIGHT, VK_SHIFT, VK_TAB,
 };
@@ -358,6 +358,12 @@ fn fatal(text: &str) -> ! {
 }
 
 pub fn run(browser: Browser, _profile: Option<PathBuf>) {
+    // webby is independent of the Windows display scale: it always lays
+    // out, paints and handles input at 100%, and Windows magnifies the
+    // finished window. Declared before WebKit loads so nothing else can
+    // pick a different mode for the process.
+    unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_UNAWARE) };
+
     if let Err(error) = wk::load() {
         fatal(&format!(
             "webby could not load WebKit ({error}).\n\nWebKit2.dll and the files that ship with it must sit next to webby.exe. See the README for how to fetch them."
@@ -365,7 +371,6 @@ pub fn run(browser: Browser, _profile: Option<PathBuf>) {
     }
     let api = wk::api();
     unsafe {
-        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         OleInitialize(null());
 
         let instance = GetModuleHandleW(null());
