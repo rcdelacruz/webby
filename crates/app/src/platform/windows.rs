@@ -400,6 +400,12 @@ pub fn run(browser: Browser, _profile: Option<PathBuf>) {
         let context = (api.WKContextCreateWithConfiguration)(wk::Owned((api.WKContextConfigurationCreate)()).0);
         let preferences = (api.WKPreferencesCreate)();
         (api.WKPreferencesSetDeveloperExtrasEnabled)(preferences, true);
+        // GPU compositing in the bundled WebKit draws pages misplaced and
+        // out of step with mouse input; the project that publishes that
+        // build always runs it with compositing off on Windows. Setting
+        // WEBBY_GPU=1 turns it back on for testing.
+        let gpu = std::env::var_os("WEBBY_GPU").is_some_and(|v| v == "1");
+        (api.WKPreferencesSetAcceleratedCompositingEnabled)(preferences, gpu);
         let new_configuration = || {
             let configuration = (api.WKPageConfigurationCreate)();
             (api.WKPageConfigurationSetContext)(configuration, context);

@@ -102,6 +102,7 @@ webkit_api! {
     fn WKWebsiteDataStoreGetDefaultDataStore() -> Ref;
     fn WKPreferencesCreate() -> Ref;
     fn WKPreferencesSetDeveloperExtrasEnabled(Ref, bool);
+    fn WKPreferencesSetAcceleratedCompositingEnabled(Ref, bool);
 
     fn WKPageConfigurationCreate() -> Ref;
     fn WKPageConfigurationSetContext(Ref, Ref);
