@@ -1,0 +1,94 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Media support</title>
+<style>
+:root { color-scheme: light dark; }
+body { font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; margin: 32px auto; max-width: 860px; padding: 0 20px; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+p { margin: 0 0 18px; opacity: .7; }
+table { border-collapse: collapse; width: 100%; }
+td { padding: 5px 10px; border-bottom: 1px solid rgba(128,128,128,.25); vertical-align: top; word-break: break-word; }
+td:first-child { width: 46%; font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; }
+.yes { color: #1a9a4b; font-weight: 600; }
+.no { color: #d43c3c; font-weight: 600; }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; opacity: .6; margin: 26px 0 6px; }
+</style>
+</head>
+<body>
+<h1>Media support in this browser</h1>
+<p>What this build of webby reports to web pages about audio and video.</p>
+<div id="out"></div>
+<script>
+"use strict";
+const out = document.getElementById("out");
+let table;
+const section = title => {
+  out.insertAdjacentHTML("beforeend", `<h2>${title}</h2>`);
+  table = out.appendChild(document.createElement("table"));
+};
+const row = (name, value) => {
+  const text = value === true ? "yes" : value === false || value === "" ? "no" : String(value);
+  const cls = text === "no" ? "no" : ["yes", "probably", "maybe", "true"].includes(text) ? "yes" : "";
+  const tr = table.insertRow();
+  tr.insertCell().textContent = name;
+  const cell = tr.insertCell();
+  cell.textContent = text;
+  cell.className = cls;
+};
+
+section("Browser");
+row("navigator.userAgent", navigator.userAgent);
+row("navigator.platform", navigator.platform);
+row("navigator.vendor", navigator.vendor);
+
+section("Streaming features");
+row("MediaSource", "MediaSource" in window);
+row("ManagedMediaSource", "ManagedMediaSource" in window);
+row("WebKitMediaSource", "WebKitMediaSource" in window);
+row("MediaKeys (DRM)", "MediaKeys" in window);
+row("WebKitMediaKeys (FairPlay)", "WebKitMediaKeys" in window);
+row("navigator.requestMediaKeySystemAccess", "requestMediaKeySystemAccess" in navigator);
+row("navigator.mediaCapabilities", "mediaCapabilities" in navigator);
+row("AudioContext", "AudioContext" in window || "webkitAudioContext" in window);
+
+const TYPES = [
+  "application/vnd.apple.mpegurl",
+  "application/x-mpegURL",
+  "application/dash+xml",
+  "video/mp4",
+  'video/mp4; codecs="avc1.640028"',
+  'video/mp4; codecs="hvc1.1.6.L120.90"',
+  'video/mp4; codecs="dvh1.05.06"',
+  "audio/mp4",
+  'audio/mp4; codecs="mp4a.40.2"',
+  'audio/mp4; codecs="ac-3"',
+  'audio/mp4; codecs="ec-3"',
+  'video/mp4; codecs="avc1.640028, ec-3"',
+  "audio/eac3",
+  "audio/ac3",
+  "audio/mpeg",
+  "video/webm",
+];
+section("video.canPlayType");
+const video = document.createElement("video");
+for (const type of TYPES) row(type, video.canPlayType(type));
+
+section("MediaSource.isTypeSupported");
+const MS = window.ManagedMediaSource || window.MediaSource || window.WebKitMediaSource;
+if (!MS) row("(no MediaSource in this build)", false);
+else for (const type of TYPES.filter(t => t.includes("codecs"))) row(type, MS.isTypeSupported(type));
+
+section("mediaCapabilities.decodingInfo (Dolby Digital Plus 5.1)");
+if (!navigator.mediaCapabilities) row("(no mediaCapabilities in this build)", false);
+else for (const kind of ["file", "media-source"]) {
+  const t = table;
+  navigator.mediaCapabilities
+    .decodingInfo({ type: kind, audio: { contentType: 'audio/mp4; codecs="ec-3"', channels: "6", bitrate: 384000, samplerate: 48000 } })
+    .then(info => { table = t; row(kind, info.supported); })
+    .catch(error => { table = t; row(kind, "error: " + error.message); });
+}
+</script>
+</body>
+</html>

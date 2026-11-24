@@ -27,6 +27,9 @@ pub const MESSAGE_HANDLER: &str = "webby";
 /// The chrome UI document, shared verbatim by every platform.
 pub const CHROME_HTML: &str = include_str!("../ui/chrome.html");
 
+/// A diagnostics page, reached by typing `webby:media` in the address bar.
+pub const MEDIA_HTML: &str = include_str!("../ui/media.html");
+
 /// What the core needs from a platform: a window holding one chrome web
 /// view and any number of content web views, of which one is visible.
 pub trait Shell {

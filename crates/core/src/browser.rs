@@ -134,6 +134,12 @@ impl Browser {
                 }
             }
             UiCommand::Navigate { input } => {
+                // A built-in page reporting what media this build can play.
+                if let (Some(id), "webby:media") = (self.active, input.trim()) {
+                    shell.load_html(id, crate::MEDIA_HTML);
+                    shell.focus_view(id);
+                    return;
+                }
                 if let (Some(id), Some(url)) = (self.active, omnibox::resolve(&input)) {
                     self.load(shell, id, &url);
                     shell.focus_view(id);
