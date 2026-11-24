@@ -26,6 +26,29 @@ use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 type Rt = Runtime<WinShell>;
 
+/// What pages see as the browser. WebKit's default on Windows omits the
+/// Safari token and reports Windows 8, so sites that look for Safari, or
+/// for a current system, misjudge it.
+const USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
+
+/// Runs in every page before its own scripts. On Windows WebKit answers
+/// `mediaCapabilities.decodingInfo()` with "unsupported" for every file,
+/// even formats `canPlayType()` says it plays through the system decoders
+/// (Dolby Digital Plus among them). Sites that ask the first API then
+/// refuse media the browser could play, so make the two agree.
+const MEDIA_CAPABILITIES_FIX: &str = r#"(() => {
+  const capabilities = navigator.mediaCapabilities;
+  if (!capabilities || !capabilities.decodingInfo) return;
+  const original = capabilities.decodingInfo.bind(capabilities);
+  const probe = document.createElement("video");
+  capabilities.decodingInfo = configuration => original(configuration).then(info => {
+    if (info.supported || !configuration || configuration.type !== "file") return info;
+    const types = [configuration.video, configuration.audio].filter(Boolean).map(track => track.contentType);
+    const playable = types.length > 0 && types.every(type => probe.canPlayType(type) !== "");
+    return playable ? { supported: true, smooth: true, powerEfficient: false, configuration: info.configuration } : info;
+  });
+})();"#;
+
 thread_local! {
     static RUNTIME: RefCell<Option<Rc<Rt>>> = const { RefCell::new(None) };
     /// Window handles the window procedure lays out. Kept apart from the
@@ -164,6 +187,7 @@ impl Shell for WinShell {
         unsafe {
             let view = View::new(id, self.configuration, self.window);
             ShowWindow(view.hwnd, SW_HIDE);
+            (api.WKPageSetCustomUserAgent)(view.page, wk::string(USER_AGENT).0);
             let info = &*view as *const View as *const c_void;
 
             let mut state: wk::PageStateClientV0 = std::mem::zeroed();
@@ -429,7 +453,14 @@ pub fn run(browser: Browser, _profile: Option<PathBuf>) {
 
         LAYOUT.set(Layout { chrome: chrome.hwnd, active: null_mut(), chrome_height: chrome_height(GetDpiForWindow(window)) });
         let chrome_page = chrome.page;
-        let shell = WinShell { window, configuration: new_configuration(), chrome, views: HashMap::new() };
+        // Content views share one configuration, whose pages all get the
+        // media capabilities fix.
+        let configuration = new_configuration();
+        let scripts = wk::Owned((api.WKUserContentControllerCreate)());
+        let fix = wk::Owned((api.WKUserScriptCreateWithSource)(wk::string(MEDIA_CAPABILITIES_FIX).0, 0, false));
+        (api.WKUserContentControllerAddUserScript)(scripts.0, fix.0);
+        (api.WKPageConfigurationSetUserContentController)(configuration, scripts.0);
+        let shell = WinShell { window, configuration, chrome, views: HashMap::new() };
         RUNTIME.with(|r| *r.borrow_mut() = Some(Rc::new(Runtime::new(browser, shell))));
 
         ShowWindow(window, SW_SHOWDEFAULT);

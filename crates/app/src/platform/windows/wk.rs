@@ -112,6 +112,8 @@ webkit_api! {
 
     fn WKUserContentControllerCreate() -> Ref;
     fn WKUserContentControllerAddScriptMessageHandler(Ref, Ref, ScriptMessageCallback, *const c_void);
+    fn WKUserContentControllerAddUserScript(Ref, Ref);
+    fn WKUserScriptCreateWithSource(Ref, c_int, bool) -> Ref;
     fn WKScriptMessageGetBody(Ref) -> Ref;
     fn WKCompletionListenerComplete(Ref, Ref);
 
@@ -132,6 +134,7 @@ webkit_api! {
     fn WKPageCopyActiveURL(Ref) -> Ref;
     fn WKPageGetEstimatedProgress(Ref) -> f64;
     fn WKPageClose(Ref);
+    fn WKPageSetCustomUserAgent(Ref, Ref);
     fn WKPageSetPageStateClient(Ref, *mut ClientBase);
     fn WKPageSetPageUIClient(Ref, *const ClientBase);
     fn WKPageEvaluateJavaScriptInMainFrame(Ref, Ref, *mut c_void, Option<EvaluateCallback>);
