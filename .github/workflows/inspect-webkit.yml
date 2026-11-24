@@ -1,0 +1,35 @@
+name: Inspect bundled WebKit
+
+# Diagnostic only: reports which media components the Windows WebKit
+# build contains. Runs when this branch is pushed.
+on:
+  push:
+    branches: [claude/inspect-webkit]
+
+jobs:
+  inspect:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch WebKit
+        shell: pwsh
+        run: .\scripts\fetch-webkit-windows.ps1 -Destination wk
+      - name: List files
+        shell: pwsh
+        run: |
+          Get-ChildItem wk -Recurse -File | Sort-Object Length -Descending |
+            ForEach-Object { "{0,12} {1}" -f $_.Length, $_.FullName.Substring((Resolve-Path wk).Path.Length + 1) }
+      - name: Media-related strings
+        shell: pwsh
+        run: |
+          $patterns = 'gstreamer','avcodec','libav','eac3','ec-3','ac-3','MFCreate','MediaFoundation','mfplat','widevine','playready','clearkey','MediaSource','opus','vorbis','x-h264','avdec_','mp4a','hvc1'
+          foreach ($file in Get-ChildItem wk -Recurse -File -Include *.dll,*.exe) {
+            $text = [System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($file.FullName))
+            $hits = $patterns | Where-Object { $text.IndexOf($_, [StringComparison]::OrdinalIgnoreCase) -ge 0 }
+            if ($hits) { "{0}: {1}" -f $file.Name, ($hits -join ', ') }
+          }
+      - name: Imports of WebKit2.dll
+        shell: pwsh
+        run: |
+          $dumpbin = Get-ChildItem "C:\Program Files\Microsoft Visual Studio" -Recurse -Filter dumpbin.exe -ErrorAction SilentlyContinue | Where-Object FullName -match 'Hostx64\\x64' | Select-Object -First 1
+          & $dumpbin.FullName /dependents wk\WebKit2.dll
