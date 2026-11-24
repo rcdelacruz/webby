@@ -338,7 +338,7 @@ impl Browser {
             return;
         }
         let title = active.map(|t| if t.start_page { "New Tab" } else { t.view.title.as_str() }).unwrap_or("");
-        shell.set_window_title(&if title.is_empty() { "Webby".to_string() } else { format!("{title} — Webby") });
+        shell.set_window_title(&if title.is_empty() { "webby".to_string() } else { format!("{title} — webby") });
         shell.eval_chrome(&format!("webby.update({json})"));
         self.pushed = json;
     }
@@ -420,7 +420,7 @@ mod tests {
         let (_, s) = started();
         assert_eq!(&s.0[..3], ["create 1", "html 1", "show 1"]);
         assert!(has(&s, "focus chrome"));
-        assert!(has(&s, "title New Tab — Webby"));
+        assert!(has(&s, "title New Tab — webby"));
         assert!(s.0.last().unwrap().starts_with(r#"eval webby.update({"tabs":[{"id":1,"title":"New Tab","url":"","#));
     }
 

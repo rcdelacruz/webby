@@ -1,4 +1,4 @@
-# Webby
+# webby
 
 A small web browser written in Rust that renders with **WebKit on every
 platform**, including Windows, where Safari has not been available since 2012.
@@ -58,7 +58,7 @@ cargo build --release
 .\target\release\webby.exe
 ```
 
-Webby loads `WebKit2.dll` when it starts, so the build itself needs no
+webby loads `WebKit2.dll` when it starts, so the build itself needs no
 WebKit SDK. Apple publishes no Windows binaries of WebKit; the script
 downloads the build of WebKit's Windows port that the Playwright project
 publishes for browser testing and unpacks it next to `webby.exe`. To use
@@ -71,8 +71,8 @@ copy the files next to `webby.exe` by hand.
 | Platform | Output | Built by |
 | --- | --- | --- |
 | Linux | `dist/webby_<version>_<arch>.deb` | `packaging/linux/build-deb.sh` |
-| macOS | `dist/Webby-<version>-macos.dmg` (universal) | `packaging/macos/build-dmg.sh` |
-| Windows | `Webby-<version>-windows-x64-setup.exe` | Inno Setup, `packaging/windows/webby.iss` |
+| macOS | `dist/webby-<version>-macos.dmg` (universal) | `packaging/macos/build-dmg.sh` |
+| Windows | `webby-<version>-windows-x64-setup.exe` | Inno Setup, `packaging/windows/webby.iss` |
 
 CI builds all three on every push and attaches them to the run. Pushing a
 tag such as `v0.1.0` also publishes them as a GitHub release.

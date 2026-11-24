@@ -1,6 +1,6 @@
 [package]
 name = "webby"
-description = "Webby, a small cross-platform WebKit browser"
+description = "webby, a small cross-platform WebKit browser"
 version.workspace = true
 edition.workspace = true
 

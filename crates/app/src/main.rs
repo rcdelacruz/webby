@@ -1,4 +1,4 @@
-//! Webby: a small WebKit browser. The platform modules below each wrap
+//! webby: a small WebKit browser. The platform modules below each wrap
 //! their operating system's WebKit port behind `webby_core::Shell`.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]

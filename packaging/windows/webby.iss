@@ -1,4 +1,4 @@
-; Inno Setup script for Webby. Build with:
+; Inno Setup script for webby. Build with:
 ;   iscc /DVersion=0.1.0 /DSourceDir=..\..\dist packaging\windows\webby.iss
 ; SourceDir must hold webby.exe together with WebKit2.dll and the files
 ; that ship with it (see scripts\fetch-webkit-windows.ps1).
@@ -12,12 +12,12 @@
 
 [Setup]
 AppId={{B5F0A3C2-6D1E-4B7A-9C48-2E7F1A0D3B65}
-AppName=Webby
+AppName=webby
 AppVersion={#Version}
-AppPublisher=Webby
+AppPublisher=webby
 AppPublisherURL=https://github.com/rcdelacruz/webby
-DefaultDirName={autopf}\Webby
-DefaultGroupName=Webby
+DefaultDirName={autopf}\webby
+DefaultGroupName=webby
 DisableProgramGroupPage=yes
 ; Installs for the current user without asking for administrator rights.
 PrivilegesRequired=lowest
@@ -26,7 +26,7 @@ ArchitecturesInstallIn64BitMode=x64compatible
 SetupIconFile=..\icons\webby.ico
 UninstallDisplayIcon={app}\webby.ico
 OutputDir=..\..\dist-installer
-OutputBaseFilename=Webby-{#Version}-windows-x64-setup
+OutputBaseFilename=webby-{#Version}-windows-x64-setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -39,8 +39,8 @@ Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
 Source: "..\icons\webby.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\Webby"; Filename: "{app}\webby.exe"; IconFilename: "{app}\webby.ico"
-Name: "{autodesktop}\Webby"; Filename: "{app}\webby.exe"; IconFilename: "{app}\webby.ico"; Tasks: desktopicon
+Name: "{group}\webby"; Filename: "{app}\webby.exe"; IconFilename: "{app}\webby.ico"
+Name: "{autodesktop}\webby"; Filename: "{app}\webby.exe"; IconFilename: "{app}\webby.ico"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\webby.exe"; Description: "{cm:LaunchProgram,Webby}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\webby.exe"; Description: "{cm:LaunchProgram,webby}"; Flags: nowait postinstall skipifsilent

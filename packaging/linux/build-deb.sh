@@ -10,7 +10,7 @@ arch=$(dpkg --print-architecture)
 binary=target/release/webby
 [ -x "$binary" ] || { echo "error: $binary not found; run cargo build --release first" >&2; exit 1; }
 
-id=co.coderstudio.Webby
+id=co.coderstudio.webby
 root=$(mktemp -d)
 trap 'rm -rf "$root"' EXIT
 
@@ -31,7 +31,7 @@ Depends: libgtk-4-1, libwebkitgtk-6.0-4
 Installed-Size: $(du -sk "$root/usr" | cut -f1)
 Homepage: https://github.com/rcdelacruz/webby
 Description: Small web browser built on WebKit
- Webby is a tabbed web browser written in Rust that renders with
+ webby is a tabbed web browser written in Rust that renders with
  WebKitGTK.
 CONTROL
 

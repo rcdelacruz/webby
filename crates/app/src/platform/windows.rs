@@ -335,14 +335,14 @@ unsafe fn shortcut_for(message: &MSG) -> Option<Shortcut> {
 }
 
 fn fatal(text: &str) -> ! {
-    unsafe { MessageBoxW(null_mut(), wide(text).as_ptr(), wide("Webby").as_ptr(), MB_OK | MB_ICONERROR) };
+    unsafe { MessageBoxW(null_mut(), wide(text).as_ptr(), wide("webby").as_ptr(), MB_OK | MB_ICONERROR) };
     std::process::exit(1);
 }
 
 pub fn run(browser: Browser, _profile: Option<PathBuf>) {
     if let Err(error) = wk::load() {
         fatal(&format!(
-            "Webby could not load WebKit ({error}).\n\nWebKit2.dll and the files that ship with it must sit next to webby.exe. See the README for how to fetch them."
+            "webby could not load WebKit ({error}).\n\nWebKit2.dll and the files that ship with it must sit next to webby.exe. See the README for how to fetch them."
         ));
     }
     let api = wk::api();
@@ -351,7 +351,7 @@ pub fn run(browser: Browser, _profile: Option<PathBuf>) {
         OleInitialize(null());
 
         let instance = GetModuleHandleW(null());
-        let class_name = wide("WebbyWindow");
+        let class_name = wide("webbyWindow");
         let class = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(window_proc),
@@ -364,7 +364,7 @@ pub fn run(browser: Browser, _profile: Option<PathBuf>) {
         let window = CreateWindowExW(
             0,
             class_name.as_ptr(),
-            wide("Webby").as_ptr(),
+            wide("webby").as_ptr(),
             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -376,7 +376,7 @@ pub fn run(browser: Browser, _profile: Option<PathBuf>) {
             null(),
         );
         if window.is_null() {
-            fatal("Webby could not create its window.");
+            fatal("webby could not create its window.");
         }
         // WebKit renders best at whole-number scale factors.
         let scale = (GetDpiForWindow(window) as f64 / 96.0).round().max(1.0);

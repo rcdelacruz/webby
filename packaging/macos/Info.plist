@@ -2,11 +2,11 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key><string>Webby</string>
-    <key>CFBundleDisplayName</key><string>Webby</string>
-    <key>CFBundleIdentifier</key><string>co.coderstudio.Webby</string>
+    <key>CFBundleName</key><string>webby</string>
+    <key>CFBundleDisplayName</key><string>webby</string>
+    <key>CFBundleIdentifier</key><string>co.coderstudio.webby</string>
     <key>CFBundleExecutable</key><string>webby</string>
-    <key>CFBundleIconFile</key><string>Webby</string>
+    <key>CFBundleIconFile</key><string>webby</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleShortVersionString</key><string>@VERSION@</string>

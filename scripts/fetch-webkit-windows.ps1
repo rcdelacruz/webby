@@ -3,7 +3,7 @@
   Download a prebuilt WebKit for Windows and place it next to webby.exe.
 
 .DESCRIPTION
-  Webby on Windows loads WebKit2.dll at startup. Apple does not publish
+  webby on Windows loads WebKit2.dll at startup. Apple does not publish
   Windows binaries of WebKit, so by default this fetches the build of
   WebKit's Windows port that the Playwright project publishes for browser
   testing. Set WEBBY_WEBKIT_URL to use any other zip that contains

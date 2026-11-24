@@ -4,6 +4,9 @@ pub fn escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
+/// The app icon, shown above the search box.
+const LOGO: &str = include_str!("../../../packaging/icons/webby.svg");
+
 pub fn html(top_sites: &[(String, String)]) -> String {
     let mut tiles = String::new();
     for (url, title) in top_sites {
@@ -25,7 +28,8 @@ pub fn html(top_sites: &[(String, String)]) -> String {
 @media (prefers-color-scheme: dark) {{ :root {{ --bg:#1c1c1e; --fg:#f2f2f2; --muted:#98989d; --card:#2a2a2d; --line:#3a3a3d; --accent:#4c9bff; }} }}
 * {{ box-sizing: border-box; }}
 body {{ margin:0; background:var(--bg); color:var(--fg); font:15px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif; }}
-main {{ max-width:720px; margin:0 auto; padding:16vh 24px 48px; }}
+main {{ max-width:720px; margin:0 auto; padding:12vh 24px 48px; }}
+.logo {{ width:88px; margin:0 auto 14px; }} .logo svg {{ display:block; }}
 h1 {{ font-size:34px; font-weight:650; letter-spacing:-.02em; margin:0 0 24px; text-align:center; }}
 form input {{ width:100%; padding:13px 18px; font:inherit; color:inherit; background:var(--card); border:1px solid var(--line); border-radius:12px; outline:none; }}
 form input:focus {{ border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent); }}
@@ -36,10 +40,12 @@ h2 {{ font-size:12px; font-weight:600; text-transform:uppercase; letter-spacing:
 .badge {{ flex:none; width:28px; height:28px; border-radius:7px; background:var(--accent); color:#fff; display:grid; place-items:center; font-weight:600; font-size:13px; }}
 .label {{ overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; }}
 </style></head><body><main>
-<h1>Webby</h1>
+<div class=logo>{logo}</div>
+<h1>webby</h1>
 <form action="https://duckduckgo.com/" method="get"><input name="q" placeholder="Search the web" autocomplete="off"></form>
 {sites}
-</main></body></html>"#
+</main></body></html>"#,
+        logo = LOGO
     )
 }
 

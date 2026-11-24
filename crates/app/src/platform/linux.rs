@@ -39,7 +39,7 @@ struct GtkShell {
 }
 
 pub fn run(browser: Browser, profile: Option<PathBuf>) {
-    let app = gtk::Application::new(Some("co.coderstudio.Webby"), gio::ApplicationFlags::NON_UNIQUE);
+    let app = gtk::Application::new(Some("co.coderstudio.webby"), gio::ApplicationFlags::NON_UNIQUE);
     let pending = RefCell::new(Some(browser));
     app.connect_activate(move |app| {
         if let Some(browser) = pending.take() {
@@ -50,10 +50,10 @@ pub fn run(browser: Browser, profile: Option<PathBuf>) {
 }
 
 fn build(app: &gtk::Application, browser: Browser, profile: Option<&PathBuf>) {
-    let window = gtk::ApplicationWindow::builder().application(app).title("Webby").default_width(1200).default_height(800).build();
+    let window = gtk::ApplicationWindow::builder().application(app).title("webby").default_width(1200).default_height(800).build();
 
     // Matches the icon the package installs; ignored when it is absent.
-    window.set_icon_name(Some("co.coderstudio.Webby"));
+    window.set_icon_name(Some("co.coderstudio.webby"));
 
     let messages = UserContentManager::new();
     messages.register_script_message_handler(MESSAGE_HANDLER, None);

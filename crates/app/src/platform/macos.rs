@@ -288,7 +288,7 @@ impl Shell for MacShell {
 }
 
 pub fn run(browser: Browser, _profile: Option<PathBuf>) {
-    let mtm = MainThreadMarker::new().expect("Webby must start on the main thread");
+    let mtm = MainThreadMarker::new().expect("webby must start on the main thread");
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
     let controller = Controller::new(mtm);
@@ -306,7 +306,7 @@ pub fn run(browser: Browser, _profile: Option<PathBuf>) {
     };
     // The shell owns the window; AppKit must not free it on close.
     unsafe { window.setReleasedWhenClosed(false) };
-    window.setTitle(ns_string!("Webby"));
+    window.setTitle(ns_string!("webby"));
     window.setContentMinSize(NSSize::new(480.0, 320.0));
     window.center();
 
@@ -363,7 +363,7 @@ fn main_menu(mtm: MainThreadMarker, controller: &Controller) -> Retained<NSMenu>
 
     let control_shift = NSEventModifierFlags::Control | NSEventModifierFlags::Shift;
     let menus: Vec<(&str, Vec<Retained<NSMenuItem>>)> = vec![
-        ("Webby", vec![standard("Hide Webby", sel!(hide:), "h"), standard("Quit Webby", sel!(terminate:), "q")]),
+        ("webby", vec![standard("Hide webby", sel!(hide:), "h"), standard("Quit webby", sel!(terminate:), "q")]),
         ("File", vec![shortcut("New Tab", 0, "t", CMD), shortcut("Open Location…", 2, "l", CMD), shortcut("Close Tab", 1, "w", CMD)]),
         (
             "Edit",

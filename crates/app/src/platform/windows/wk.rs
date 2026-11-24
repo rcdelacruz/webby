@@ -55,7 +55,7 @@ pub struct PageStateClientV0 {
 }
 
 /// `WKPageUIClientV6`, the first version with the current `createNewPage`
-/// signature. Webby only sets that one callback; the 57 function
+/// signature. webby only sets that one callback; the 57 function
 /// pointers of versions 0–5 before it and the four after it stay null.
 #[repr(C)]
 pub struct PageUIClientV6 {
@@ -139,7 +139,7 @@ webkit_api! {
 
 static API: OnceLock<Api> = OnceLock::new();
 
-/// Load `WebKit2.dll` and resolve every function Webby uses.
+/// Load `WebKit2.dll` and resolve every function webby uses.
 pub fn load() -> Result<(), String> {
     if API.get().is_none() {
         // SAFETY: loading WebKit runs its initialisers, which is the point;

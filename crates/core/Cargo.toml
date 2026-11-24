@@ -1,6 +1,6 @@
 [package]
 name = "webby-core"
-description = "Platform-independent browser logic for Webby"
+description = "Platform-independent browser logic for webby"
 version.workspace = true
 edition.workspace = true
 

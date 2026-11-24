@@ -1,4 +1,4 @@
-//! Platform-independent browser logic for Webby.
+//! Platform-independent browser logic for webby.
 //!
 //! The core owns the tab model, address-bar parsing, history and session
 //! persistence. It talks to the outside world only through the [`Shell`]
