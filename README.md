@@ -1,4 +1,4 @@
-# webby
+<h1><img src="packaging/icons/webby-wordmark.svg" alt="webby" width="220"></h1>
 
 A small web browser written in Rust that renders with **WebKit on every
 platform**, including Windows, where Safari has not been available since 2012.
