@@ -3,6 +3,8 @@ name = "webby"
 description = "webby, a small cross-platform WebKit browser"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 dirs = "7.0.0"

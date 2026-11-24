@@ -190,3 +190,11 @@ caused it.
 - Per-site zoom and content blocking
 - Code signing, and an icon embedded in the Windows executable
 - On Windows, the display scale is read once at startup
+
+## License
+
+webby is open source under the [MIT License](LICENSE).
+
+WebKit itself is a separate project under its own LGPL and BSD licenses.
+The Windows installer bundles a prebuilt WebKit; macOS and Linux use the
+WebKit already provided by the system.

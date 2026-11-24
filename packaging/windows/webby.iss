@@ -30,6 +30,7 @@ OutputBaseFilename=webby-{#Version}-windows-x64-setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
+LicenseFile=..\..\LICENSE
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
