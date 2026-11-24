@@ -52,6 +52,9 @@ pub fn run(browser: Browser, profile: Option<PathBuf>) {
 fn build(app: &gtk::Application, browser: Browser, profile: Option<&PathBuf>) {
     let window = gtk::ApplicationWindow::builder().application(app).title("Webby").default_width(1200).default_height(800).build();
 
+    // Matches the icon the package installs; ignored when it is absent.
+    window.set_icon_name(Some("co.coderstudio.Webby"));
+
     let messages = UserContentManager::new();
     messages.register_script_message_handler(MESSAGE_HANDLER, None);
     let chrome = WebView::builder().user_content_manager(&messages).build();

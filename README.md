@@ -66,6 +66,23 @@ a WebKit you built yourself from [webkit.org](https://webkit.org/webkit-on-windo
 sources, zip its `bin` directory and point `WEBBY_WEBKIT_URL` at it, or
 copy the files next to `webby.exe` by hand.
 
+## Installers
+
+| Platform | Output | Built by |
+| --- | --- | --- |
+| Linux | `dist/webby_<version>_<arch>.deb` | `packaging/linux/build-deb.sh` |
+| macOS | `dist/Webby-<version>-macos.dmg` (universal) | `packaging/macos/build-dmg.sh` |
+| Windows | `Webby-<version>-windows-x64-setup.exe` | Inno Setup, `packaging/windows/webby.iss` |
+
+CI builds all three on every push and attaches them to the run. Pushing a
+tag such as `v0.1.0` also publishes them as a GitHub release.
+
+None of the installers is code signed. macOS will refuse to open the app
+on first launch (right-click the app and choose Open, or sign it with a
+Developer ID), and Windows SmartScreen will warn before running the
+setup. The Windows installer includes WebKit and installs per user, with
+no administrator prompt.
+
 History and the session file live in the platform data directory
 (`~/.local/share/webby`, `~/Library/Application Support/webby`,
 `%APPDATA%\webby`). Set `WEBBY_PROFILE` to use another directory.
@@ -97,6 +114,5 @@ hundred lines each.
 Downloads, bookmarks, error pages on macOS and Windows (a failed load
 leaves the previous page),  find in page, private windows, a history view,
 permission prompts (camera, location, notifications), JavaScript dialogs
-(`alert`, `confirm`) on macOS and Windows, per-site zoom, content blocking, and packaging (`.app` bundle,
-installer, `.desktop` file). On Windows the DPI scale is read once at
+(`alert`, `confirm`) on macOS and Windows, per-site zoom, content blocking, code signing, and an icon embedded in the Windows executable. On Windows the DPI scale is read once at
 startup.

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Webby
+GenericName=Web Browser
+Comment=Browse the web with WebKit
+Exec=webby
+Icon=co.coderstudio.Webby
+Terminal=false
+Categories=Network;WebBrowser;
+StartupNotify=true
+StartupWMClass=co.coderstudio.Webby
