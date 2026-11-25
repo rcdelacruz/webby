@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: ["**"]
+    paths-ignore: ["webkit/**", ".github/workflows/webkit-windows.yml"]
     tags: ["v*"]
   pull_request:
   workflow_dispatch:

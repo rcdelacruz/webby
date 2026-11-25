@@ -1,0 +1,98 @@
+name: WebKit for Windows
+
+# Builds WebKit's Windows port from source, with webby's patches applied.
+# A full build takes hours; compiler output is cached between runs, so a
+# run that hits the time limit is continued by the next one.
+on:
+  push:
+    branches: [claude/webkit-windows]
+    paths: [".github/workflows/webkit-windows.yml", "webkit/**"]
+  workflow_dispatch:
+
+env:
+  # WebKit revision to build: a branch name or a full commit hash.
+  WEBKIT_REF: main
+  SOURCE: C:\wk
+  CC: clang-cl
+  CXX: clang-cl
+  SCCACHE_GHA_ENABLED: "true"
+  VCPKG_DEFAULT_BINARY_CACHE: C:\vcpkg-cache
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch WebKit source
+        shell: pwsh
+        run: |
+          git config --global core.autocrlf input
+          git init $env:SOURCE
+          cd $env:SOURCE
+          git remote add origin https://github.com/WebKit/WebKit.git
+          # Tests and benchmarks are most of the repository and are not built.
+          git sparse-checkout set --no-cone '/*' '!/LayoutTests' '!/PerformanceTests' '!/JSTests' '!/Websites' '!/ManualTests'
+          git fetch --depth 1 origin $env:WEBKIT_REF
+          git checkout FETCH_HEAD
+          "Building WebKit at $(git rev-parse HEAD)" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
+
+      - name: Apply webby's patches
+        shell: pwsh
+        run: |
+          $patches = Get-ChildItem webkit\patches -Filter *.patch | Sort-Object Name
+          foreach ($patch in $patches) {
+            "Applying $($patch.Name)"
+            git -C $env:SOURCE apply --whitespace=nowarn $patch.FullName
+            if ($LASTEXITCODE -ne 0) { throw "Patch $($patch.Name) did not apply" }
+          }
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Install build tools
+        shell: pwsh
+        run: |
+          choco install gperf ninja -y --no-progress
+          New-Item -ItemType Directory -Force -Path $env:VCPKG_DEFAULT_BINARY_CACHE | Out-Null
+          "VCPKG_ROOT=$env:VCPKG_INSTALLATION_ROOT" | Out-File -FilePath $env:GITHUB_ENV -Append
+          clang-cl --version; cmake --version; ninja --version; perl --version | Select-Object -First 2; ruby --version; gperf --version | Select-Object -First 1
+
+      - name: Restore dependency cache
+        uses: actions/cache@v4
+        with:
+          path: C:\vcpkg-cache
+          key: webkit-vcpkg-${{ env.WEBKIT_REF }}-${{ github.run_id }}
+          restore-keys: |
+            webkit-vcpkg-${{ env.WEBKIT_REF }}-
+            webkit-vcpkg-
+
+      - name: Build WebKit
+        shell: pwsh
+        working-directory: ${{ env.SOURCE }}
+        run: |
+          perl Tools/Scripts/build-webkit --release --cmakeargs="-DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache -DENABLE_API_TESTS=OFF -DENABLE_LAYOUT_TESTS=OFF"
+          if ($LASTEXITCODE -ne 0) { throw "build-webkit failed" }
+
+      - name: Collect binaries
+        shell: pwsh
+        run: |
+          $bin = Join-Path $env:SOURCE "WebKitBuild\Release\bin64"
+          New-Item -ItemType Directory -Path dist | Out-Null
+          Copy-Item (Join-Path $bin "*") dist -Recurse -Exclude *.pdb,*.ilk,*.exp,*.lib,TestWebKitAPI*,WebKitTestRunner*,DumpRenderTree*
+          Get-ChildItem dist | Sort-Object Length -Descending | Select-Object -First 40 Name, Length
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: webkit-windows
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Compiler cache statistics
+        if: always()
+        shell: pwsh
+        run: sccache --show-stats
