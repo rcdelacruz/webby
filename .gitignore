@@ -2,3 +2,7 @@
 /dist
 /dist-installer
 /stage
+
+# added by nexus
+.claude/
+graphify-out/
