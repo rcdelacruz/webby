@@ -5,6 +5,8 @@
 // only ever invoked by Windows or WebKit with the arguments they document.
 #![allow(unsafe_op_in_unsafe_fn)]
 
+#[path = "windows/webview2.rs"]
+mod webview2;
 #[path = "windows/wk.rs"]
 mod wk;
 
@@ -355,9 +357,14 @@ unsafe fn shortcut_for(message: &MSG) -> Option<Shortcut> {
     if message.message != WM_KEYDOWN && message.message != WM_SYSKEYDOWN {
         return None;
     }
-    let down = |key: u16| GetKeyState(key as i32) < 0;
+    shortcut_for_key(message.wParam as u16)
+}
+
+/// The browser shortcut, if any, for a key going down with the modifiers
+/// currently held.
+fn shortcut_for_key(key: u16) -> Option<Shortcut> {
+    let down = |key: u16| unsafe { GetKeyState(key as i32) } < 0;
     let (ctrl, shift, alt) = (down(VK_CONTROL), down(VK_SHIFT), down(VK_MENU));
-    let key = message.wParam as u16;
     match (ctrl, alt, key) {
         (false, false, VK_F5) => Some(Shortcut::Reload),
         (false, true, VK_LEFT) => Some(Shortcut::Back),
@@ -381,13 +388,29 @@ fn fatal(text: &str) -> ! {
     std::process::exit(1);
 }
 
-pub fn run(browser: Browser, _profile: Option<PathBuf>) {
+pub fn run(browser: Browser, profile: Option<PathBuf>) {
     // webby is independent of the Windows display scale: it always lays
     // out, paints and handles input at 100%, and Windows magnifies the
-    // finished window. Declared before WebKit loads so nothing else can
-    // pick a different mode for the process.
+    // finished window. Declared before any engine loads so nothing else
+    // can pick a different mode for the process.
     unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_UNAWARE) };
 
+    // WebKit's Windows port has no Media Source Extensions, Web Audio or
+    // DRM, so streaming sites cannot play in it. The default engine on
+    // Windows is therefore WebView2, which ships with Windows 10 and 11.
+    // WEBBY_ENGINE=webkit selects the bundled WebKit instead; it is also
+    // the fallback when the WebView2 runtime is missing.
+    let wants_webkit = std::env::var_os("WEBBY_ENGINE").is_some_and(|v| v == "webkit");
+    if !wants_webkit {
+        match webview2::environment(profile.as_deref()) {
+            Ok(environment) => return webview2::run(browser, environment),
+            Err(error) => eprintln!("webby: WebView2 is unavailable ({error}); using WebKit"),
+        }
+    }
+    run_webkit(browser);
+}
+
+fn run_webkit(browser: Browser) {
     if let Err(error) = wk::load() {
         fatal(&format!(
             "webby could not load WebKit ({error}).\n\nWebKit2.dll and the files that ship with it must sit next to webby.exe. See the README for how to fetch them."
