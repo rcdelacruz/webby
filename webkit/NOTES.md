@@ -344,7 +344,82 @@ Open, in order of importance:
    not see every frame of a fullscreen window.
 
 State of the build machine: WebKit tree `C:\wk`, branch `webby-gstreamer`,
-16 commits on 5fb92adf43 (these patches). Build with
+17 commits on 5fb92adf43 (these patches). Build with
 `C:\wk-tools\ninja-gst.cmd`, collect with `C:\wk-tools\assemble-gst.sh <dir>`.
 `C:\wk-tools\gst` has the build of 0001-0016; `C:\wk-tools\gst-prev` an older
 one without the scrolling work (no flicker, slow scrolling).
+`C:\wk-tools\gst-dev` is a mixed copy: its `WebKit2.dll` is the build of
+0001-0017 (same hash as `C:\wk-build-gst\Release\bin`), but its three WebKit
+helper executables and its `webby.exe` are from 21:59, an hour older. The
+measurements below were taken with that mix.
+
+## Flicker in the amp lists: found and fixed (2026-11-25, late; patch 0017)
+
+What it was. This is open item 1 above. Whether item 2 (Movies stuck on
+placeholders) had the same cause is not known. In the amp
+lists the mouse rests on a card while the page scrolls under it. Hovering a
+card starts a short animation on its play button, and while that runs WebKit
+makes that card, and every card after it in the list, a layer of its own
+(about 40 at a time). On this port those layers then came out blank except
+for the ones that would be on screen with the list scrolled to the top. The
+page itself had already been repainted without the cards, so whole stretches
+of the list went empty for 100 to 300 ms, several times in one scroll.
+It depends on where the mouse is, so some scrolls showed it and some did not.
+
+Why. A composited layer inside a scrollable box does not hang under the
+scroller's own layers. It hangs under a clip layer and a "scrolling proxy"
+layer that repeats the scroller's offset. Patch 0012 turned composited
+overflow scrolling on, and two things about proxies were missing here:
+
+- Ports with a scrolling thread let it move the proxies. Here nothing moved
+  them between geometry updates. The main thread now does, in
+  `RenderLayerBacking::updateScrollOffset`.
+- `GraphicsLayerWC::computeVisibleAndCoverageRect` left out the bounds origin
+  of a parent that does not clip, which is what a proxy is. Every layer below
+  a proxy took the unscrolled viewport for its visible part, and on this port
+  a layer only has tiles where it is visible. This was the part that made
+  them blank.
+
+How it was found, for next time: a contact sheet of the screen during a
+scroll (one small capture every 60 ms or so) showed which frames were blank;
+logging each layer's visible rect and tile paints from `recursiveCommitChanges`
+showed card layers with a visible rect of 0x0. Suspects that were ruled out:
+tile rect rounding (0010), tile bitmaps arriving empty, the flush before an
+update timing out, view transitions.
+
+Measured on screen with 0001-0017, amp Albums and Movies lists, wheel scrolls
+of 15 and 30 notches down and up:
+
+| Check | 0001-0016 | 0001-0017 |
+| --- | --- | --- |
+| Captures in which part of the list is missing, of about 38 per scroll | several (counted by eye on the contact sheets, roughly 6 to 10) | 0 |
+| Wheel scrolling, typical gap between screen updates, amp and Wikipedia | 16.7 ms | 16.7 ms |
+| Movies page shows its posters after loading (8 loads) | stuck on placeholders twice (from the earlier handoff, not re-measured) | 8 of 8; the failure was never reproduced, so this does not show it is fixed |
+| The app's fullscreen button during a film: enter, picture, Esc | not checked | works, 23.7 frames/s in fullscreen and in the window |
+| Media check page | 9/9 | 9/9 |
+
+The first rows were measured on a 3840x2160 display at 225% and the
+fullscreen row on 2560x1440 at 150%.
+
+The 17 patch files, applied to 5fb92adf43, give the same tree as `C:\wk`
+(compared by tree hash). The build in `C:\wk-build-gst` is up to date with
+that tree (ninja reports no work) and has `ENABLE_SMOOTH_SCROLLING 1` in
+`cmakeconfig.h`, so a separate build from scratch was not done. One was
+started in `C:\wk-build-clean` and stopped early; that directory can be
+deleted.
+
+Still open:
+
+1. The cards still become layers and stop being layers as the mouse passes
+   over them. Nothing goes blank now, but each switch repaints the visible
+   part of the list on the CPU: a gap of 50 to 80 ms now and then on a long
+   scroll. Fewer switches would need WebKit to keep cards after an animating
+   one in the list's own layer.
+2. Scrolling a script-heavy page (YouTube during playback) is jerky: this
+   port scrolls on the main thread. Needs a scrolling thread; a large change.
+3. Fullscreen 60 fps still has no trustworthy measurement.
+4. `webkit-windows.yml` now collects the GStreamer runtime with WebKit, but
+   that step has never run: the CI build is too costly, so the workflow only
+   starts by hand and WebKit is built on the build machine. The installer
+   built by `ci.yml` still bundles the downloaded WebKit. Switching the installer over, and trimming
+   the plugin set, are the remaining parts of step 6.

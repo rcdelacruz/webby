@@ -1,0 +1,92 @@
+From 5c0095eb2fe06fe8e03c14731d5ba8bba1cd186c Mon Sep 17 00:00:00 2001
+From: webby <webby@localhost>
+Date: Wed, 25 Nov 2026 23:11:27 +0800
+Subject: [PATCH] WC compositor: layers inside a scroller follow its scroll
+ position
+
+A composited layer inside a scrollable box hangs under a clip layer and a
+"scrolling proxy" layer that repeats the scroller's offset. Two things kept
+such layers from following a scroll on this port.
+
+The proxies are moved by the scrolling thread on ports that have one, and
+otherwise only when the layer's geometry is next updated. The main thread now
+moves them in the same step that moves the scroller.
+
+GraphicsLayerWC worked out which part of a layer is visible without the bounds
+origin of a parent that does not clip, which is what a proxy is. A layer below
+a proxy took the unscrolled viewport for its visible part, so once the scroller
+had moved it got no tiles and showed nothing.
+
+Seen as flicker in lists of cards: hovering a card starts an animation, which
+makes that card and every card after it a layer of its own for a moment, and
+all but the cards of the first screenful came out blank.
+---
+ .../WebCore/rendering/RenderLayerBacking.cpp  | 26 +++++++++++++++++++
+ .../WebProcess/WebPage/wc/GraphicsLayerWC.cpp |  7 +++++
+ 2 files changed, 33 insertions(+)
+
+diff --git a/Source/WebCore/rendering/RenderLayerBacking.cpp b/Source/WebCore/rendering/RenderLayerBacking.cpp
+index 1f9fa7dec3..90078101fd 100644
+--- a/Source/WebCore/rendering/RenderLayerBacking.cpp
++++ b/Source/WebCore/rendering/RenderLayerBacking.cpp
+@@ -2176,6 +2176,28 @@ void RenderLayerBacking::setLocationOfScrolledContents(ScrollOffset scrollOffset
+         m_scrollContainerLayer->setBoundsOrigin(scrollOffset);
+ }
+ 
++#if USE(GRAPHICS_LAYER_WC)
++// A composited layer inside a scroller is not a child of the scroller's own layers: it hangs
++// under a clip layer and a "scrolling proxy" layer that repeats the scroller's offset. Where
++// there is a scrolling thread, it moves the proxies along with the scroller. This port has
++// none, so without this a proxy keeps the offset of the last geometry update while the
++// scroller moves, and its layers stay where they were until something else updates them.
++static void updateScrollingProxiesOfDescendants(const RenderLayer& scroller, const RenderLayer& layer, ScrollOffset scrollOffset)
++{
++    for (auto* child = layer.firstChild(); child; child = child->nextSibling()) {
++        if (auto* backing = child->backing()) {
++            if (auto* clippingStack = backing->ancestorClippingStack()) {
++                for (auto& entry : clippingStack->stack()) {
++                    if (entry.clipData.isOverflowScroll && entry.scrollingLayer && entry.clipData.clippingLayer.get() == &scroller)
++                        Ref { *entry.scrollingLayer }->setBoundsOrigin(scrollOffset);
++                }
++            }
++        }
++        updateScrollingProxiesOfDescendants(scroller, *child, scrollOffset);
++    }
++}
++#endif
++
+ void RenderLayerBacking::updateScrollOffset(ScrollOffset scrollOffset)
+ {
+     auto* scrollableArea = m_owningLayer.scrollableArea();
+@@ -2198,6 +2220,10 @@ void RenderLayerBacking::updateScrollOffset(ScrollOffset scrollOffset)
+         scrollableArea->setRequiresScrollPositionReconciliation(false);
+     }
+ 
++#if USE(GRAPHICS_LAYER_WC)
++    updateScrollingProxiesOfDescendants(m_owningLayer, m_owningLayer, scrollOffset);
++#endif
++
+     ASSERT(m_scrolledContentsLayer->position().isZero());
+ }
+ 
+diff --git a/Source/WebKit/WebProcess/WebPage/wc/GraphicsLayerWC.cpp b/Source/WebKit/WebProcess/WebPage/wc/GraphicsLayerWC.cpp
+index 9a511d1755..e2abbea312 100644
+--- a/Source/WebKit/WebProcess/WebPage/wc/GraphicsLayerWC.cpp
++++ b/Source/WebKit/WebProcess/WebPage/wc/GraphicsLayerWC.cpp
+@@ -764,6 +764,13 @@ GraphicsLayerWC::VisibleAndCoverageRects GraphicsLayerWC::computeVisibleAndCover
+     FloatPoint position = approximatePosition();
+     client().customPositionForVisibleRectComputation(this, position);
+ 
++    // A parent that clips has put its bounds origin (its scroll offset) into the state already,
++    // below. One that does not clip has not, and the proxy layers that repeat a scroller's
++    // offset for composited layers inside it are of that kind. Without this such a layer takes
++    // the unscrolled viewport for its visible part, and gets no tiles once it scrolls into view.
++    if (auto* parentLayer = parent(); parentLayer && !parentLayer->masksToBounds())
++        position.moveBy(-parentLayer->boundsOrigin());
++
+     TransformationMatrix layerTransform;
+     TransformationMatrix currentTransform;
+     if (client().getCurrentTransform(this, currentTransform))
+-- 
+2.56.1.windows.1
+

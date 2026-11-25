@@ -2,11 +2,9 @@ name: WebKit for Windows
 
 # Builds WebKit's Windows port from source, with webby's patches applied.
 # A full build takes hours; compiler output is cached between runs, so a
-# run that hits the time limit is continued by the next one.
+# run that hits the time limit is continued by the next one. It is costly,
+# so it only runs when started by hand, never on a push.
 on:
-  push:
-    branches: [claude/webkit-windows]
-    paths: [".github/workflows/webkit-windows.yml", "webkit/**"]
   workflow_dispatch:
 
 env:
@@ -81,9 +79,26 @@ jobs:
       - name: Collect binaries
         shell: pwsh
         run: |
-          $bin = Join-Path $env:SOURCE "WebKitBuild\Release\bin64"
-          New-Item -ItemType Directory -Path dist | Out-Null
-          Copy-Item (Join-Path $bin "*") dist -Recurse -Exclude *.pdb,*.ilk,*.exp,*.lib,TestWebKitAPI*,WebKitTestRunner*,DumpRenderTree*
+          # Everything webby needs next to webby.exe, in one flat folder:
+          # WebKit itself, the libraries it was built against, and GStreamer's
+          # plugins in a gstreamer-1.0 folder, which is how webby recognises
+          # this build (see configure_gstreamer in crates/app).
+          $release = Join-Path $env:SOURCE "WebKitBuild\Release"
+          $bin = @("bin", "bin64") | ForEach-Object { Join-Path $release $_ } | Where-Object { Test-Path (Join-Path $_ "WebKit2.dll") } | Select-Object -First 1
+          if (-not $bin) { throw "No WebKit2.dll under $release" }
+          $deps = Join-Path $release "vcpkg_installed\x64-windows-webkit"
+          New-Item -ItemType Directory -Path dist\gstreamer-1.0 | Out-Null
+          Copy-Item (Join-Path $bin "*") dist -Recurse -Exclude *.pdb,*.ilk,*.exp,*.lib,test*,jsc.exe,LLInt*,TestWebKitAPI*,WebKitTestRunner*,DumpRenderTree*,MiniBrowser*,WebDriver*
+          Copy-Item (Join-Path $deps "bin\*.dll") dist
+          Copy-Item (Join-Path $deps "plugins\gstreamer\*.dll") dist\gstreamer-1.0
+          Copy-Item (Join-Path $deps "tools\gstreamer\gst-plugin-scanner.exe") dist
+          foreach ($needed in "WebKit2.dll", "gstreamer-1.0-0.dll", "gst-plugin-scanner.exe") {
+            if (-not (Test-Path (Join-Path dist $needed))) { throw "$needed is missing from the collected files" }
+          }
+          $plugins = (Get-ChildItem dist\gstreamer-1.0 -Filter *.dll).Count
+          if ($plugins -eq 0) { throw "No GStreamer plugins were collected" }
+          $size = (Get-ChildItem dist -Recurse -File | Measure-Object Length -Sum).Sum
+          "Collected $((Get-ChildItem dist -Recurse -File).Count) files, $plugins GStreamer plugins, $([math]::Round($size / 1MB)) MB" | Tee-Object -FilePath $env:GITHUB_STEP_SUMMARY -Append
           Get-ChildItem dist | Sort-Object Length -Descending | Select-Object -First 40 Name, Length
 
       - uses: actions/upload-artifact@v4

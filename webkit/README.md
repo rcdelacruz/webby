@@ -6,8 +6,11 @@ directory holds what webby needs to build its own WebKit for Windows with
 those added.
 
 - `.github/workflows/webkit-windows.yml` builds WebKit's Windows port from
-  source and uploads the binaries webby loads (`WebKit2.dll` and the files
-  beside it).
+  source and uploads everything webby needs next to `webby.exe`:
+  `WebKit2.dll` and its helper processes, the libraries they were built
+  against, and GStreamer's plugins in a `gstreamer-1.0` folder. Unzip the
+  artifact beside `webby.exe`, or point `WEBBY_WEBKIT_URL` at the zip and
+  run `scripts/fetch-webkit-windows.ps1`.
 - `patches/` holds webby's changes to WebKit, applied in name order before
   the build.
 
