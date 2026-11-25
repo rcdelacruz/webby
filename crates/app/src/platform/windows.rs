@@ -133,8 +133,12 @@ impl Drop for View {
             if layout.fullscreen && layout.active == self.hwnd {
                 leave_fullscreen(GetParent(self.hwnd));
             }
-            ShowWindow(self.hwnd, SW_HIDE);
-            (api.WKPageClose)(self.page);
+            // Destroy the view's window before letting go of the view. WebKit
+            // closes the page when the window is destroyed, but releasing the
+            // view does not destroy the window: it would stay behind, hidden,
+            // with a pointer to the freed view, and the next message sent to
+            // it (a change of the active window is enough) would crash.
+            DestroyWindow(self.hwnd);
             (api.WKRelease)(self.view);
         }
     }
