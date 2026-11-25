@@ -1,0 +1,1016 @@
+From 17ace3812b7385f00c31cfe9e54d50758108c9b2 Mon Sep 17 00:00:00 2001
+From: webby <webby@localhost>
+Date: Wed, 25 Nov 2026 17:35:48 +0800
+Subject: [PATCH 7/8] Windows port: use WebCore's GStreamer media backend
+
+Replaces Media Foundation with the GStreamer backend of the GTK and WPE
+ports, which brings Media Source Extensions and Web Audio.
+
+Build: OptionsWin.cmake includes the GStreamer option and check modules and
+finds GLib and GStreamer through vcpkg's pkgconf; WTF builds the GLib smart
+pointer helpers; WebCore includes platform/GStreamer.cmake. USE(GLIB) stays
+off, so the port keeps its Windows run loop, file system and IPC: the wtf/glib
+headers the GStreamer code needs accept USE(GSTREAMER) instead.
+
+Port work in the GStreamer code:
+- Bus messages reach the RunLoop of the thread that asked for them through
+  the bus's sync-message signal, since no GLib main loop runs.
+- fnmatch(), /proc/self/cmdline and /var/tmp have Windows equivalents.
+- The fallback video sink converts to sRGB BGRx on the GPU (d3d11convert)
+  before the frame is downloaded; videoconvert manages 10 frames a second at
+  1080p.
+- A frame is converted to an image once, not once for every tile painted,
+  and frames already in the paint format skip the conversion pipeline.
+- When the page is composited the frames go to a WCPlatformLayerImage, which
+  the compositor shows as a texture; otherwise they are painted.
+- AudioBus loads the HRTF impulse responses from WebKit.resources\audio.
+
+Also fixes code that had not been compiled on Windows before: a dllexport
+member of a dllexport class, ssize_t, an atomic_flag initializer, and includes
+and calls that were only valid with coordinated graphics or the GLib run loop.
+---
+ Source/WTF/wtf/PlatformWin.cmake              |  27 ++++
+ Source/WTF/wtf/glib/GRefPtr.cpp               |   4 +-
+ Source/WTF/wtf/glib/GRefPtr.h                 |   5 +-
+ Source/WTF/wtf/glib/GThreadSafeWeakPtr.h      |   4 +-
+ Source/WTF/wtf/glib/GUniquePtr.h              |   4 +-
+ Source/WTF/wtf/glib/GWeakPtr.h                |   4 +-
+ Source/WTF/wtf/glib/RunLoopSourcePriority.h   |   4 +-
+ .../Modules/mediasource/MediaSource.cpp       |   6 +-
+ Source/WebCore/PlatformWin.cmake              |  30 ++++
+ Source/WebCore/platform/GStreamer.cmake       |   8 +-
+ .../platform/audio/win/AudioBusWin.cpp        |  49 +++++++
+ .../WebCore/platform/glib/ApplicationGLib.h   |   4 +-
+ .../WebCore/platform/graphics/MediaPlayer.cpp |   2 +
+ .../platform/graphics/MediaSourcePrivate.h    |   2 +-
+ .../graphics/gstreamer/GStreamerCommon.cpp    |  68 +++++++++-
+ .../graphics/gstreamer/GStreamerCommon.h      |  11 ++
+ .../gstreamer/GStreamerRegistryScanner.cpp    |   1 -
+ .../GStreamerVideoFrameConverter.cpp          |   2 +
+ .../gstreamer/ImageDecoderGStreamer.cpp       |   4 +
+ .../gstreamer/MediaPlayerPrivateGStreamer.cpp | 128 ++++++++++++++++--
+ .../gstreamer/MediaPlayerPrivateGStreamer.h   |  20 ++-
+ .../gstreamer/VideoFrameGStreamer.cpp         |   8 ++
+ .../graphics/gstreamer/mse/AppendPipeline.cpp |   1 -
+ Source/WebKit/PlatformWin.cmake               |  10 ++
+ Source/cmake/GStreamerChecks.cmake            |   5 +-
+ Source/cmake/OptionsWin.cmake                 |  31 ++++-
+ 26 files changed, 398 insertions(+), 44 deletions(-)
+ create mode 100644 Source/WebCore/platform/audio/win/AudioBusWin.cpp
+
+diff --git a/Source/WTF/wtf/PlatformWin.cmake b/Source/WTF/wtf/PlatformWin.cmake
+index bc9cd64534..72f70df817 100644
+--- a/Source/WTF/wtf/PlatformWin.cmake
++++ b/Source/WTF/wtf/PlatformWin.cmake
+@@ -42,3 +42,30 @@ list(APPEND WTF_LIBRARIES
+     synchronization
+     winmm
+ )
++
++if (USE_GSTREAMER)
++    # The GStreamer media backend uses WTF's GLib smart pointers and helpers.
++    # The port keeps its Windows run loop and file system: USE(GLIB) stays off.
++    list(APPEND WTF_SOURCES
++        glib/GMallocString.cpp
++        glib/GRefPtr.cpp
++        glib/GSpanExtras.cpp
++    )
++
++    list(APPEND WTF_PUBLIC_HEADERS
++        glib/GLibExtras.h
++        glib/GMallocString.h
++        glib/GRefPtr.h
++        glib/GSpanExtras.h
++        glib/GThreadSafeWeakPtr.h
++        glib/GTypedefs.h
++        glib/GUniquePtr.h
++        glib/GWeakPtr.h
++        glib/RunLoopSourcePriority.h
++        glib/WTFGType.h
++    )
++
++    list(APPEND WTF_LIBRARIES
++        GLib::Gio
++    )
++endif ()
+diff --git a/Source/WTF/wtf/glib/GRefPtr.cpp b/Source/WTF/wtf/glib/GRefPtr.cpp
+index f009addfb9..d8e374cb55 100644
+--- a/Source/WTF/wtf/glib/GRefPtr.cpp
++++ b/Source/WTF/wtf/glib/GRefPtr.cpp
+@@ -19,7 +19,7 @@
+ #include "config.h"
+ #include <wtf/glib/GRefPtr.h>
+ 
+-#if USE(GLIB)
++#if USE(GLIB) || USE(GSTREAMER)
+ #include <gio/gio.h>
+ 
+ namespace WTF {
+@@ -29,4 +29,4 @@ WTF_DEFINE_GREF_TRAITS(GResource, g_resource_ref, g_resource_unref)
+ 
+ } // namespace WTF
+ 
+-#endif // USE(GLIB)
++#endif // USE(GLIB) || USE(GSTREAMER)
+diff --git a/Source/WTF/wtf/glib/GRefPtr.h b/Source/WTF/wtf/glib/GRefPtr.h
+index 7679bfc3fc..b5b28e291e 100644
+--- a/Source/WTF/wtf/glib/GRefPtr.h
++++ b/Source/WTF/wtf/glib/GRefPtr.h
+@@ -23,11 +23,12 @@
+ 
+ #pragma once
+ 
+-#if USE(GLIB)
++#if USE(GLIB) || USE(GSTREAMER)
+ 
+ #include <algorithm>
+ #include <glib-object.h>
+ #include <wtf/HashTraits.h>
++#include <wtf/glib/GTypedefs.h>
+ 
+ extern "C" {
+     typedef struct _GDBusConnection GDBusConnection;
+@@ -382,4 +383,4 @@ WTF_DEFINE_GREF_TRAITS_INLINE(GVariant, g_variant_ref_sink, g_variant_unref, g_v
+ using WTF::GRefPtr;
+ using WTF::adoptGRef;
+ 
+-#endif // USE(GLIB)
++#endif // USE(GLIB) || USE(GSTREAMER)
+diff --git a/Source/WTF/wtf/glib/GThreadSafeWeakPtr.h b/Source/WTF/wtf/glib/GThreadSafeWeakPtr.h
+index 06d30538e3..21abb88645 100644
+--- a/Source/WTF/wtf/glib/GThreadSafeWeakPtr.h
++++ b/Source/WTF/wtf/glib/GThreadSafeWeakPtr.h
+@@ -20,7 +20,7 @@
+ 
+ #pragma once
+ 
+-#if USE(GLIB)
++#if USE(GLIB) || USE(GSTREAMER)
+ 
+ #include "GRefPtr.h"
+ 
+@@ -80,4 +80,4 @@ private:
+ 
+ using WTF::GThreadSafeWeakPtr;
+ 
+-#endif // USE(GLIB)
++#endif // USE(GLIB) || USE(GSTREAMER)
+diff --git a/Source/WTF/wtf/glib/GUniquePtr.h b/Source/WTF/wtf/glib/GUniquePtr.h
+index e404109695..96bc968e55 100644
+--- a/Source/WTF/wtf/glib/GUniquePtr.h
++++ b/Source/WTF/wtf/glib/GUniquePtr.h
+@@ -20,7 +20,7 @@
+ 
+ #pragma once
+ 
+-#if USE(GLIB)
++#if USE(GLIB) || USE(GSTREAMER)
+ 
+ #include <gio/gio.h>
+ #include <utility>
+@@ -141,4 +141,4 @@ using WTF::GUniquePtr;
+ using WTF::GUniqueOutPtr;
+ using WTF::GFreeDeleter;
+ 
+-#endif // USE(GLIB)
++#endif // USE(GLIB) || USE(GSTREAMER)
+diff --git a/Source/WTF/wtf/glib/GWeakPtr.h b/Source/WTF/wtf/glib/GWeakPtr.h
+index 5e6a56e01b..14bb95fc4d 100644
+--- a/Source/WTF/wtf/glib/GWeakPtr.h
++++ b/Source/WTF/wtf/glib/GWeakPtr.h
+@@ -20,7 +20,7 @@
+ 
+ #pragma once
+ 
+-#if USE(GLIB)
++#if USE(GLIB) || USE(GSTREAMER)
+ 
+ #include <glib-object.h>
+ #include <wtf/Noncopyable.h>
+@@ -114,4 +114,4 @@ private:
+ 
+ using WTF::GWeakPtr;
+ 
+-#endif // USE(GLIB)
++#endif // USE(GLIB) || USE(GSTREAMER)
+diff --git a/Source/WTF/wtf/glib/RunLoopSourcePriority.h b/Source/WTF/wtf/glib/RunLoopSourcePriority.h
+index 768b21d34c..798e131c11 100644
+--- a/Source/WTF/wtf/glib/RunLoopSourcePriority.h
++++ b/Source/WTF/wtf/glib/RunLoopSourcePriority.h
+@@ -19,7 +19,7 @@
+ 
+ #pragma once
+ 
+-#if USE(GLIB)
++#if USE(GLIB) || USE(GSTREAMER)
+ 
+ namespace WTF {
+ 
+@@ -83,4 +83,4 @@ enum RunLoopSourcePriority {
+ 
+ using WTF::RunLoopSourcePriority;
+ 
+-#endif // USE(GLIB)
++#endif // USE(GLIB) || USE(GSTREAMER)
+diff --git a/Source/WebCore/Modules/mediasource/MediaSource.cpp b/Source/WebCore/Modules/mediasource/MediaSource.cpp
+index 4965dc2e4a..d71b3fe50f 100644
+--- a/Source/WebCore/Modules/mediasource/MediaSource.cpp
++++ b/Source/WebCore/Modules/mediasource/MediaSource.cpp
+@@ -803,7 +803,7 @@ void MediaSource::removeSourceBufferWithOptionalDestruction(SourceBuffer& buffer
+             bool removedEnabledAudioTrack = false;
+ 
+             // 5.3 For each AudioTrack object in the SourceBuffer audioTracks list, run the following steps:
+-            for (ssize_t index = audioTracks->length() - 1; index >= 0; index--) {
++            for (std::ptrdiff_t index = audioTracks->length() - 1; index >= 0; index--) {
+                 Ref track = audioTracks->item(index);
+ 
+                 if (withDestruction) {
+@@ -858,7 +858,7 @@ void MediaSource::removeSourceBufferWithOptionalDestruction(SourceBuffer& buffer
+             bool removedSelectedVideoTrack = false;
+ 
+             // 7.3 For each VideoTrack object in the SourceBuffer videoTracks list, run the following steps:
+-            for (ssize_t index = videoTracks->length() - 1; index >= 0; index--) {
++            for (std::ptrdiff_t index = videoTracks->length() - 1; index >= 0; index--) {
+                 Ref track = videoTracks->item(index);
+ 
+                 if (withDestruction) {
+@@ -913,7 +913,7 @@ void MediaSource::removeSourceBufferWithOptionalDestruction(SourceBuffer& buffer
+             bool removedEnabledTextTrack = false;
+ 
+             // 9.3 For each TextTrack object in the SourceBuffer textTracks list, run the following steps:
+-            for (ssize_t index = textTracks->length() - 1; index >= 0; index--) {
++            for (std::ptrdiff_t index = textTracks->length() - 1; index >= 0; index--) {
+                 Ref track = *textTracks->item(index);
+ 
+                 if (withDestruction) {
+diff --git a/Source/WebCore/PlatformWin.cmake b/Source/WebCore/PlatformWin.cmake
+index 3207b155fb..426a495cdf 100644
+--- a/Source/WebCore/PlatformWin.cmake
++++ b/Source/WebCore/PlatformWin.cmake
+@@ -180,6 +180,36 @@ file(COPY ${ModernMediaControlsImageFiles}
+     ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/WebKit.resources/media-controls
+ )
+ 
++if (USE_GSTREAMER)
++    include(platform/GStreamer.cmake)
++
++    list(APPEND WebCore_PRIVATE_INCLUDE_DIRECTORIES
++        "${WEBCORE_DIR}/platform/glib"
++        "${WEBCORE_DIR}/platform/mock/mediasource"
++    )
++
++    list(APPEND WebCore_SOURCES
++        platform/audio/win/AudioBusWin.cpp
++
++        platform/glib/ApplicationGLib.cpp
++    )
++
++    list(APPEND WebCore_PRIVATE_FRAMEWORK_HEADERS
++        platform/glib/ApplicationGLib.h
++    )
++
++    # DirectWrite, for the Skia font cache. It used to come with Media Foundation.
++    list(APPEND WebCore_PRIVATE_LIBRARIES dwrite)
++
++    if (ENABLE_WEB_AUDIO)
++        # Impulse responses for the HRTF panner, read by AudioBusWin.cpp.
++        file(GLOB WebAudioResourceFiles "${WEBCORE_DIR}/platform/audio/resources/*.wav")
++        file(COPY ${WebAudioResourceFiles}
++            DESTINATION ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/WebKit.resources/audio
++        )
++    endif ()
++endif ()
++
+ if (ENABLE_VIDEO AND USE_MEDIA_FOUNDATION)
+     # Define a INTERFACE library for MediaFoundation and link it
+     # explicitly with direct WebCore consumers because /DELAYLOAD causes
+diff --git a/Source/WebCore/platform/GStreamer.cmake b/Source/WebCore/platform/GStreamer.cmake
+index ce1c66972c..8d882b3c75 100644
+--- a/Source/WebCore/platform/GStreamer.cmake
++++ b/Source/WebCore/platform/GStreamer.cmake
+@@ -1,9 +1,11 @@
+ include(CheckCXXSymbolExists)
+ 
+ if (ENABLE_VIDEO OR ENABLE_WEB_AUDIO)
+-    list(APPEND WebCore_LIBRARIES
+-        GLib::GioUnix
+-    )
++    if (WIN32)
++        list(APPEND WebCore_LIBRARIES GLib::Gio)
++    else ()
++        list(APPEND WebCore_LIBRARIES GLib::GioUnix)
++    endif ()
+ 
+     list(APPEND WebCore_PRIVATE_INCLUDE_DIRECTORIES
+         "${WEBCORE_DIR}/Modules/mediastream/gstreamer"
+diff --git a/Source/WebCore/platform/audio/win/AudioBusWin.cpp b/Source/WebCore/platform/audio/win/AudioBusWin.cpp
+new file mode 100644
+index 0000000000..f0eee6d79e
+--- /dev/null
++++ b/Source/WebCore/platform/audio/win/AudioBusWin.cpp
+@@ -0,0 +1,49 @@
++/*
++ * Copyright (C) 2026 webby contributors.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "config.h"
++
++#if ENABLE(WEB_AUDIO)
++
++#include "AudioBus.h"
++
++#include "AudioFileReader.h"
++#include "WebCoreBundleWin.h"
++#include <wtf/FileSystem.h>
++
++namespace WebCore {
++
++// The spatialization impulse responses ship as WebKit.resources\audio\*.wav.
++RefPtr<AudioBus> AudioBus::loadPlatformResource(StringView name, float sampleRate)
++{
++    auto data = FileSystem::readEntireFile(webKitBundlePath(name, "wav"_s, "audio"_s));
++    if (!data)
++        return nullptr;
++    return createBusFromInMemoryAudioFile(data->span(), false, sampleRate);
++}
++
++} // namespace WebCore
++
++#endif // ENABLE(WEB_AUDIO)
+diff --git a/Source/WebCore/platform/glib/ApplicationGLib.h b/Source/WebCore/platform/glib/ApplicationGLib.h
+index b566c78f0e..20fc8e2d35 100644
+--- a/Source/WebCore/platform/glib/ApplicationGLib.h
++++ b/Source/WebCore/platform/glib/ApplicationGLib.h
+@@ -18,7 +18,7 @@
+ 
+ #pragma once
+ 
+-#if USE(GLIB)
++#if USE(GLIB) || USE(GSTREAMER)
+ 
+ #include <wtf/Forward.h>
+ 
+@@ -32,4 +32,4 @@ WEBCORE_EXPORT const String& getApplicationID();
+ 
+ } // namespace WebCore
+ 
+-#endif // USE(GLIB)
++#endif // USE(GLIB) || USE(GSTREAMER)
+diff --git a/Source/WebCore/platform/graphics/MediaPlayer.cpp b/Source/WebCore/platform/graphics/MediaPlayer.cpp
+index 0a719779ee..cc00a9d5e9 100644
+--- a/Source/WebCore/platform/graphics/MediaPlayer.cpp
++++ b/Source/WebCore/platform/graphics/MediaPlayer.cpp
+@@ -76,7 +76,9 @@
+ #endif
+ 
+ #if USE(GSTREAMER)
++#if USE(COORDINATED_GRAPHICS)
+ #include "CoordinatedPlatformLayerBufferProxy.h"
++#endif
+ #include "MediaPlayerPrivateGStreamer.h"
+ #if ENABLE(MEDIA_SOURCE)
+ #include "MediaPlayerPrivateGStreamerMSE.h"
+diff --git a/Source/WebCore/platform/graphics/MediaSourcePrivate.h b/Source/WebCore/platform/graphics/MediaSourcePrivate.h
+index 5cf0c345e9..a15328355f 100644
+--- a/Source/WebCore/platform/graphics/MediaSourcePrivate.h
++++ b/Source/WebCore/platform/graphics/MediaSourcePrivate.h
+@@ -108,7 +108,7 @@ public:
+     // MediaSource readyState is "ended". Used by both MediaSource (main) on
+     // readyState/dirty triggers and MediaSourcePrivate (dispatcher) when track
+     // ranges change so a single algorithm produces the value.
+-    WEBCORE_EXPORT static PlatformTimeRanges computeBufferedRanges(const Vector<PlatformTimeRanges>& activeRanges, bool ended);
++    static PlatformTimeRanges computeBufferedRanges(const Vector<PlatformTimeRanges>& activeRanges, bool ended);
+ 
+     NODELETE MediaPlayer::ReadyState mediaPlayerReadyState() const;
+     void setMediaPlayerReadyState(MediaPlayer::ReadyState);
+diff --git a/Source/WebCore/platform/graphics/gstreamer/GStreamerCommon.cpp b/Source/WebCore/platform/graphics/gstreamer/GStreamerCommon.cpp
+index 43946e778d..a306db6be7 100644
+--- a/Source/WebCore/platform/graphics/gstreamer/GStreamerCommon.cpp
++++ b/Source/WebCore/platform/graphics/gstreamer/GStreamerCommon.cpp
+@@ -38,7 +38,6 @@
+ #include "SharedBuffer.h"
+ #include "VideoSinkGStreamer.h"
+ #include "WebKitAudioSinkGStreamer.h"
+-#include <fnmatch.h>
+ #include <mutex>
+ #include <wtf/FileSystem.h>
+ #include <wtf/HashMap.h>
+@@ -47,6 +46,7 @@
+ #include <wtf/NeverDestroyed.h>
+ #include <wtf/PrintStream.h>
+ #include <wtf/RecursiveLockAdapter.h>
++#include <wtf/RunLoop.h>
+ #include <wtf/RuntimeApplicationChecks.h>
+ #include <wtf/Scope.h>
+ #include <wtf/TZoneMallocInlines.h>
+@@ -428,6 +428,16 @@ void setGStreamerOptionsFromUIProcess(Vector<String>&& options)
+ 
+ Vector<String> extractGStreamerOptionsFromCommandLine()
+ {
++#if OS(WINDOWS)
++    Vector<String> options;
++    GUniquePtr<char*> arguments(g_win32_get_command_line());
++    for (auto* argument : span(arguments)) {
++        auto item = String::fromUTF8(argument);
++        if (item.startsWith("--gst"_s))
++            options.append(WTF::move(item));
++    }
++    return options;
++#else
+     auto contents = gFileGetContents("/proc/self/cmdline"_s);
+     if (!contents)
+         return { };
+@@ -439,6 +449,7 @@ Vector<String> extractGStreamerOptionsFromCommandLine()
+             options.append(item.toString());
+     });
+     return options;
++#endif
+ }
+ 
+ bool ensureGStreamerInitializedNonWebProcess()
+@@ -489,7 +500,12 @@ bool ensureGStreamerInitialized()
+         int argc = parameters.size() + 1;
+         char** argv = g_new0(char*, argc + 1);
+         auto argvSpan = unsafeMakeSpan(argv, argc);
++#if USE(GLIB)
+         argvSpan[0] = gStrdup(FileSystem::currentExecutableName());
++#else
++        const char* programName = g_get_prgname();
++        argvSpan[0] = g_strdup(programName ? programName : "WebKit");
++#endif
+         for (auto [arg, parameter] : zippedRange(argvSpan.subspan(1), parameters))
+             arg = gStrdup(parameter.utf8());
+ 
+@@ -1106,6 +1122,48 @@ template Vector<std::span<int16_t>> GstMappedAudioBuffer::samples(size_t) const;
+ template Vector<std::span<int32_t>> GstMappedAudioBuffer::samples(size_t) const;
+ template Vector<std::span<float>> GstMappedAudioBuffer::samples(size_t) const;
+ 
++#if !USE(GLIB_EVENT_LOOP)
++// A bus signal watch is a GLib main loop source, and nothing runs a GLib main loop
++// in this configuration. Each message is instead handed, as it is posted, to the run
++// loop of the thread that asked for the watch, where it is emitted as a "message"
++// signal just as the watch would have done.
++static GQuark busRunLoopWatchQuark()
++{
++    static GQuark quark = g_quark_from_static_string("webkit-bus-run-loop-watch");
++    return quark;
++}
++
++static void addBusSignalWatchOnRunLoop(GstBus* bus)
++{
++    gst_bus_enable_sync_message_emission(bus);
++
++    SUPPRESS_UNCOUNTED_LOCAL auto* runLoop = &RunLoop::currentSingleton();
++    runLoop->ref();
++    auto handler = g_signal_connect_data(bus, "sync-message", G_CALLBACK(+[](GstBus* bus, GstMessage* message, gpointer userData) {
++        auto& runLoop = *static_cast<RunLoop*>(userData);
++        runLoop.dispatch([bus = GRefPtr<GstBus>(bus), message = GRefPtr<GstMessage>(message)] {
++            gst_bus_async_signal_func(bus.get(), message.get(), nullptr);
++            // The bus also queues every message for a watch that does not exist.
++            while (auto queuedMessage = adoptGRef(gst_bus_pop(bus.get()))) { }
++        });
++    }), runLoop, +[](gpointer userData, GClosure*) {
++        static_cast<RunLoop*>(userData)->deref();
++    }, static_cast<GConnectFlags>(0));
++    g_object_set_qdata(G_OBJECT(bus), busRunLoopWatchQuark(), GUINT_TO_POINTER(handler));
++}
++
++static void removeBusSignalWatchOnRunLoop(GstBus* bus)
++{
++    auto handler = GPOINTER_TO_UINT(g_object_get_qdata(G_OBJECT(bus), busRunLoopWatchQuark()));
++    if (!handler)
++        return;
++
++    g_signal_handler_disconnect(bus, handler);
++    gst_bus_disable_sync_message_emission(bus);
++    g_object_set_qdata(G_OBJECT(bus), busRunLoopWatchQuark(), nullptr);
++}
++#endif // !USE(GLIB_EVENT_LOOP)
++
+ static GQuark customMessageHandlerQuark()
+ {
+     static GQuark quark = g_quark_from_static_string("pipeline-custom-message-handler");
+@@ -1120,7 +1178,11 @@ void disconnectSimpleBusMessageCallback(GstElement* pipeline)
+ 
+     GRefPtr bus = adoptGRef(gst_pipeline_get_bus(GST_PIPELINE(pipeline)));
+     g_signal_handler_disconnect(bus.get(), handler);
++#if USE(GLIB_EVENT_LOOP)
+     gst_bus_remove_signal_watch(bus.get());
++#else
++    removeBusSignalWatchOnRunLoop(bus.get());
++#endif
+     g_object_set_qdata(G_OBJECT(pipeline), customMessageHandlerQuark(), nullptr);
+ }
+ 
+@@ -1154,7 +1216,11 @@ static void dumpPipeline(const GRefPtr<GstElement>& pipeline, String&& dotFileNa
+ void connectSimpleBusMessageCallback(GstElement* pipeline, Function<void(GstMessage*)>&& customHandler, AsynchronousPipelineDumping asynchronousPipelineDumping)
+ {
+     GRefPtr bus = adoptGRef(gst_pipeline_get_bus(GST_PIPELINE(pipeline)));
++#if USE(GLIB_EVENT_LOOP)
+     gst_bus_add_signal_watch_full(bus.get(), RunLoopSourcePriority::RunLoopDispatcher);
++#else
++    addBusSignalWatchOnRunLoop(bus.get());
++#endif
+ 
+     auto data = createMessageBusData();
+     data->pipeline.reset(pipeline);
+diff --git a/Source/WebCore/platform/graphics/gstreamer/GStreamerCommon.h b/Source/WebCore/platform/graphics/gstreamer/GStreamerCommon.h
+index 5eff4ddbf5..b57a6cbeb4 100644
+--- a/Source/WebCore/platform/graphics/gstreamer/GStreamerCommon.h
++++ b/Source/WebCore/platform/graphics/gstreamer/GStreamerCommon.h
+@@ -36,6 +36,17 @@
+ #include <wtf/glib/GLibExtras.h>
+ #include <wtf/text/UTF8CStringView.h>
+ 
++#if OS(WINDOWS)
++// Windows has no fnmatch(). The patterns matched in the GStreamer code only use
++// the "*" and "?" wildcards, which GLib's matcher implements.
++inline int fnmatch(const char* pattern, const char* string, int)
++{
++    return g_pattern_match_simple(pattern, string) ? 0 : 1;
++}
++#else
++#include <fnmatch.h>
++#endif
++
+ // Same as gstinfo.h, but with the arguments converted by WTF_LOG_PRINTF_ARGS() so that call sites can pass a CString directly.
+ // The identifier of GST_CAT_LEVEL_LOG_ID() is converted with logPrintfType() for the same reason.
+ #ifndef GST_DISABLE_GST_DEBUG
+diff --git a/Source/WebCore/platform/graphics/gstreamer/GStreamerRegistryScanner.cpp b/Source/WebCore/platform/graphics/gstreamer/GStreamerRegistryScanner.cpp
+index f235c97de3..6f7cee0dd5 100644
+--- a/Source/WebCore/platform/graphics/gstreamer/GStreamerRegistryScanner.cpp
++++ b/Source/WebCore/platform/graphics/gstreamer/GStreamerRegistryScanner.cpp
+@@ -27,7 +27,6 @@
+ #include "GStreamerCommon.h"
+ #include "PlatformScreen.h"
+ #include "ScreenProperties.h"
+-#include <fnmatch.h>
+ #include <gst/pbutils/codec-utils.h>
+ #include <wtf/NeverDestroyed.h>
+ #include <wtf/PrintStream.h>
+diff --git a/Source/WebCore/platform/graphics/gstreamer/GStreamerVideoFrameConverter.cpp b/Source/WebCore/platform/graphics/gstreamer/GStreamerVideoFrameConverter.cpp
+index 65c52787ad..e7feb343ee 100644
+--- a/Source/WebCore/platform/graphics/gstreamer/GStreamerVideoFrameConverter.cpp
++++ b/Source/WebCore/platform/graphics/gstreamer/GStreamerVideoFrameConverter.cpp
+@@ -193,7 +193,9 @@ void GStreamerVideoFrameConverter::scheduleReleaseUnusedPipelinesTimer()
+     RunLoop::mainSingleton().dispatch([this] {
+         if (!m_releaseUnusedPipelinesTimer) {
+             m_releaseUnusedPipelinesTimer = makeUnique<RunLoop::Timer>(RunLoop::mainSingleton(), "GStreamerVideoFrameConverter::ReleaseUnusedPipelinesTimer"_s, this, &GStreamerVideoFrameConverter::releaseUnusedPipelinesTimerFired);
++#if USE(GLIB_EVENT_LOOP)
+             m_releaseUnusedPipelinesTimer->setPriority(RunLoopSourcePriority::ReleaseUnusedResourcesTimer);
++#endif
+         }
+         m_releaseUnusedPipelinesTimer->startRepeating(s_releaseUnusedPipelinesTimerInterval);
+     });
+diff --git a/Source/WebCore/platform/graphics/gstreamer/ImageDecoderGStreamer.cpp b/Source/WebCore/platform/graphics/gstreamer/ImageDecoderGStreamer.cpp
+index 75f95d0c12..609d3b1150 100644
+--- a/Source/WebCore/platform/graphics/gstreamer/ImageDecoderGStreamer.cpp
++++ b/Source/WebCore/platform/graphics/gstreamer/ImageDecoderGStreamer.cpp
+@@ -291,7 +291,11 @@ void ImageDecoderGStreamer::storeDecodedSample(GRefPtr<GstSample>&& sample)
+ void ImageDecoderGStreamer::pushEncodedData(const FragmentedSharedBuffer& sharedBuffer)
+ {
+     auto data = sharedBuffer.makeContiguous();
++#if USE(GLIB)
+     auto bytes = data->createGBytes();
++#else
++    GRefPtr bytes = adoptGRef(g_bytes_new(data->span().data(), data->size()));
++#endif
+     GRefPtr buffer = adoptGRef(gst_buffer_new_wrapped_bytes(bytes.get()));
+     m_eos = false;
+     m_error = false;
+diff --git a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
+index 3b62489b8c..6020352307 100644
+--- a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
++++ b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
+@@ -32,7 +32,9 @@
+ 
+ #include "AudioTrackPrivateGStreamer.h"
+ #include "GStreamerAudioMixer.h"
++#if ENABLE(MEDIA_STREAM)
+ #include "GStreamerCaptureDeviceManager.h"
++#endif
+ #include "GStreamerCommon.h"
+ #include "GStreamerQuirks.h"
+ #include "GStreamerRegistryScanner.h"
+@@ -2948,11 +2950,19 @@ void MediaPlayerPrivateGStreamer::configureDownloadBuffer(GstElement* element)
+     auto mediaDiskCachePath = GMallocString::unsafeAdoptFromUTF8(g_strdup(std::getenv("WPE_SHELL_MEDIA_DISK_CACHE_PATH")));
+     if (mediaDiskCachePath.isEmpty())
+         mediaDiskCachePath = gBuildFilename(G_DIR_SEPARATOR_S, "var", "tmp");
++#elif OS(WINDOWS)
++    // There is no /var/tmp; use the temporary directory of the user.
++    auto mediaDiskCachePath = GMallocString::unsafeAdoptFromUTF8(g_strdup(g_get_tmp_dir()));
+ #else
+     auto mediaDiskCachePath = gBuildFilename(G_DIR_SEPARATOR_S, "var", "tmp");
+ #endif
+ 
++#if OS(WINDOWS)
++    // The directory already starts with a drive letter.
++    auto newDownloadTemplate = gBuildFilename(mediaDiskCachePath, "WebKit-Media-XXXXXX");
++#else
+     auto newDownloadTemplate = gBuildFilename(G_DIR_SEPARATOR_S, mediaDiskCachePath, "WebKit-Media-XXXXXX");
++#endif
+     g_object_set(element, "temp-template", newDownloadTemplate.utf8(), nullptr);
+     GST_DEBUG_OBJECT(pipeline(), "Reconfigured file download template from '%s' to '%s'", oldDownloadTemplate.get(), newDownloadTemplate.utf8());
+ 
+@@ -3910,8 +3920,14 @@ void MediaPlayerPrivateGStreamer::eosTimerFired()
+ 
+ void MediaPlayerPrivateGStreamer::acceleratedRenderingStateChanged()
+ {
++#if USE(COORDINATED_GRAPHICS)
+     RefPtr player = m_player.get();
+     m_canRenderingBeAccelerated = player && player->acceleratedCompositingEnabled();
++#else
++    // Frames only reach a compositor through coordinated graphics. Elsewhere they
++    // are painted, whether or not the page itself is composited.
++    m_canRenderingBeAccelerated = false;
++#endif
+ }
+ 
+ bool MediaPlayerPrivateGStreamer::performTaskAtTime(Function<void(const MediaTime&)>&& task, const MediaTime& time)
+@@ -4008,6 +4024,13 @@ void MediaPlayerPrivateGStreamer::repaint()
+     }
+     ASSERT(isMainThread());
+ 
++#if USE(GRAPHICS_LAYER_WC)
++    if (m_videoLayer && m_videoLayer->isAttached()) {
++        // The page is composited and the video has a layer of its own: show the frame
++        // there, which leaves the page around it alone.
++        m_videoLayer->setImage(nativeImageForCurrentSample());
++    } else
++#endif
+     if (RefPtr player = m_player.get())
+         player->repaint();
+ 
+@@ -4268,6 +4291,8 @@ void MediaPlayerPrivateGStreamer::triggerRepaint(GRefPtr<GstSample>&& sample)
+ 
+ #if USE(COORDINATED_GRAPHICS)
+     pushTextureToCompositor(isDuplicateSample);
++#else
++    UNUSED_VARIABLE(isDuplicateSample);
+ #endif
+ }
+ 
+@@ -4408,14 +4433,8 @@ void MediaPlayerPrivateGStreamer::setPresentationSize(const IntSize& size)
+     m_size = size;
+ }
+ 
+-void MediaPlayerPrivateGStreamer::paint(GraphicsContext& context, const FloatRect& rect)
++RefPtr<NativeImage> MediaPlayerPrivateGStreamer::nativeImageForCurrentSample()
+ {
+-    if (context.paintingDisabled())
+-        return;
+-
+-    if (!m_pageIsVisible || isSuspended())
+-        return;
+-
+     // Keep a reference to the sample to avoid keeping the sampleMutex locked, which would be prone
+     // to deadlocks if triggerRepaint is called while the video frame converter is blocked on its
+     // state change.
+@@ -4424,7 +4443,7 @@ void MediaPlayerPrivateGStreamer::paint(GraphicsContext& context, const FloatRec
+     {
+         Locker sampleLocker { m_sampleMutex };
+         if (!GST_IS_SAMPLE(m_sample.get()))
+-            return;
++            return nullptr;
+ 
+         sample = m_sample;
+         videoInfo = m_videoInfo;
+@@ -4432,17 +4451,56 @@ void MediaPlayerPrivateGStreamer::paint(GraphicsContext& context, const FloatRec
+ 
+     if (!GST_IS_BUFFER(gst_sample_get_buffer(sample.get()))) {
+         GST_DEBUG_OBJECT(pipeline(), "Cancelling attempt to render sample without buffer");
+-        return;
++        return nullptr;
++    }
++
++    // A page is painted in tiles, and paint() is called for each tile the video touches.
++    // The frame is converted to an image once and the image reused: a new one for every
++    // call would be converted, and sent to the GPU process when painting goes through it,
++    // as many times as there are tiles.
++    if (m_lastPaintedSample != sample || !m_lastPaintedImage) {
++        auto presentationSize = getVideoResolutionFromCaps(gst_sample_get_caps(sample.get()));
++        if (!presentationSize)
++            return nullptr;
++
++        m_lastPaintedSample = sample;
++        Ref frame = VideoFrameGStreamer::create(WTF::move(sample), { IntSize(*presentationSize), WTF::move(videoInfo) });
++        m_lastPaintedImage = frame->copyNativeImage();
+     }
++    return m_lastPaintedImage;
++}
+ 
+-    auto caps = gst_sample_get_caps(sample.get());
+-    auto presentationSize = getVideoResolutionFromCaps(caps);
+-    if (!presentationSize)
++void MediaPlayerPrivateGStreamer::paint(GraphicsContext& context, const FloatRect& rect)
++{
++    if (context.paintingDisabled())
++        return;
++
++    if (!m_pageIsVisible || isSuspended())
+         return;
+ 
+-    Ref frame = VideoFrameGStreamer::create(WTF::move(sample), { IntSize(*presentationSize), WTF::move(videoInfo) });
+-    context.drawVideoFrame(frame, rect, ShouldDiscardAlpha::No, { m_videoSourceOrientation });
++    RefPtr image = nativeImageForCurrentSample();
++    if (!image)
++        return;
++
++    // What GraphicsContext::drawVideoFrame() does with the image of a frame.
++    RasterDrawingOptions options { m_videoSourceOrientation };
++    auto size = image->size();
++    if (options.orientation().usesWidthAsHeight())
++        size = size.transposedSize();
++    auto compositeOperator = options.compositeOperator();
++    if (compositeOperator == CompositeOperator::SourceOver && !image->hasAlpha())
++        compositeOperator = CompositeOperator::Copy;
++    context.drawNativeImage(*image, rect, FloatRect { { }, size }, { options, compositeOperator });
++}
++
++#if USE(GRAPHICS_LAYER_WC)
++PlatformLayer* MediaPlayerPrivateGStreamer::platformLayer()
++{
++    if (!m_videoLayer)
++        m_videoLayer = makeUnique<WCPlatformLayerImage>();
++    return m_videoLayer.get();
+ }
++#endif
+ 
+ ColorSpace MediaPlayerPrivateGStreamer::colorSpace()
+ {
+@@ -4589,6 +4647,40 @@ bool MediaPlayerPrivateGStreamer::shouldIgnoreIntrinsicSize()
+     return isHolePunchRenderingEnabled();
+ }
+ 
++#if OS(WINDOWS)
++// Decoders on Windows hand out Direct3D 11 textures, or system memory when they run in
++// software. The fallback sink paints BGRx or BGRA from system memory, and reaching that
++// format in videoconvert costs far more than a frame lasts. This wraps the sink so that
++// the conversion happens on the GPU and only the result is downloaded.
++static GstElement* wrapVideoSinkWithD3D11Conversion(GstElement* sink)
++{
++    GRefPtr upload = gst_element_factory_make("d3d11upload", nullptr);
++    GRefPtr convert = gst_element_factory_make("d3d11convert", nullptr);
++    GRefPtr filter = gst_element_factory_make("capsfilter", nullptr);
++    GRefPtr download = gst_element_factory_make("d3d11download", nullptr);
++    if (!upload || !convert || !filter || !download)
++        return nullptr;
++
++    // sRGB, so that the image made from a frame is in the colour space pages are painted
++    // in and drawing it needs no conversion of each pixel on the CPU.
++    GRefPtr caps = adoptGRef(gst_caps_from_string("video/x-raw(memory:D3D11Memory), format=(string){ BGRx, BGRA }, colorimetry=(string)sRGB"));
++    g_object_set(filter.get(), "caps", caps.get(), nullptr);
++
++    // The bin is returned floating, as a new element is, for the pipeline to own.
++    auto* bin = gst_bin_new("webkit-video-sink-bin");
++    gst_bin_add_many(GST_BIN_CAST(bin), upload.get(), convert.get(), filter.get(), download.get(), sink, nullptr);
++    if (!gst_element_link_many(upload.get(), convert.get(), filter.get(), download.get(), sink, nullptr)) {
++        gst_bin_remove(GST_BIN_CAST(bin), sink);
++        gst_object_unref(bin);
++        return nullptr;
++    }
++
++    GRefPtr pad = adoptGRef(gst_element_get_static_pad(upload.get(), "sink"));
++    gst_element_add_pad(bin, gst_ghost_pad_new("sink", pad.get()));
++    return bin;
++}
++#endif // OS(WINDOWS)
++
+ GstElement* MediaPlayerPrivateGStreamer::createVideoSink()
+ {
+     acceleratedRenderingStateChanged();
+@@ -4656,6 +4748,14 @@ GstElement* MediaPlayerPrivateGStreamer::createVideoSink()
+ 
+     installVideoSinkStatsProbe(m_videoSink);
+ 
++#if OS(WINDOWS)
++    if (m_isUsingFallbackVideoSink) {
++        // The pipeline takes ownership of the bin, which holds the sink.
++        if (auto* bin = wrapVideoSinkWithD3D11Conversion(m_videoSink.get()))
++            return bin;
++    }
++#endif
++
+     return m_videoSink.get();
+ }
+ 
+diff --git a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.h b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.h
+index 289315c6c4..60b0c6ace1 100644
+--- a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.h
++++ b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.h
+@@ -57,6 +57,10 @@
+ #include <wtf/WeakPtr.h>
+ #include <wtf/text/AtomStringHash.h>
+ 
++#if USE(GRAPHICS_LAYER_WC)
++#include "WCPlatformLayerImage.h"
++#endif
++
+ #if USE(COORDINATED_GRAPHICS)
+ #include "CoordinatedPlatformLayerBufferVideo.h"
+ #endif
+@@ -195,6 +199,12 @@ public:
+     RefPtr<CoordinatedPlatformLayerBufferProxy> platformLayerBufferProxy() const override;
+ #endif
+ 
++#if USE(GRAPHICS_LAYER_WC)
++    // The page's compositor shows frames in a layer of their own.
++    PlatformLayer* platformLayer() final;
++    bool supportsAcceleratedRendering() const final { return true; }
++#endif
++
+ #if ENABLE(ENCRYPTED_MEDIA)
+     void cdmInstanceAttached(CDMInstance&) final;
+     void cdmInstanceDetached(CDMInstance&) final;
+@@ -345,8 +355,8 @@ protected:
+     GstElement* createVideoSinkGL();
+ #endif
+ 
+-#if USE(COORDINATED_GRAPHICS)
+     enum class IsDuplicateSample : bool { No, Yes };
++#if USE(COORDINATED_GRAPHICS)
+     void pushTextureToCompositor(IsDuplicateSample, IsInitialBuffer = IsInitialBuffer::No);
+ #endif
+ 
+@@ -453,6 +463,14 @@ protected:
+     mutable Lock m_sampleMutex;
+     GRefPtr<GstSample> m_sample WTF_GUARDED_BY_LOCK(m_sampleMutex);
+ 
++    // The sample last shown and the image made from it. Main thread only.
++    RefPtr<NativeImage> nativeImageForCurrentSample();
++    GRefPtr<GstSample> m_lastPaintedSample;
++    RefPtr<NativeImage> m_lastPaintedImage;
++#if USE(GRAPHICS_LAYER_WC)
++    std::unique_ptr<WCPlatformLayerImage> m_videoLayer;
++#endif
++
+     mutable IntSize m_videoSizeFromCaps;
+     mutable FloatSize m_videoSize;
+     bool m_isUsingFallbackVideoSink { false };
+diff --git a/Source/WebCore/platform/graphics/gstreamer/VideoFrameGStreamer.cpp b/Source/WebCore/platform/graphics/gstreamer/VideoFrameGStreamer.cpp
+index 50b9cf111d..df2fc2bebd 100644
+--- a/Source/WebCore/platform/graphics/gstreamer/VideoFrameGStreamer.cpp
++++ b/Source/WebCore/platform/graphics/gstreamer/VideoFrameGStreamer.cpp
+@@ -164,6 +164,14 @@ static RefPtr<ImageGStreamer> convertSampleToImage(const GRefPtr<GstSample>& sam
+ #else
+     auto format = GST_VIDEO_INFO_HAS_ALPHA(&videoInfo) ? "ARGB"_s : "xRGB"_s;
+ #endif
++
++    // The fallback video sink already negotiates this format, in system memory. Such a
++    // frame needs no conversion pipeline, which would otherwise run once per painted frame.
++    auto* sampleCaps = gst_sample_get_caps(sample.get());
++    if (sampleCaps && gst_caps_get_size(sampleCaps) == 1 && gst_caps_features_is_equal(gst_caps_get_features(sampleCaps, 0), GST_CAPS_FEATURES_MEMORY_SYSTEM_MEMORY)
++        && GST_VIDEO_INFO_FORMAT(&videoInfo) == gst_video_format_from_string(format.characters()))
++        return ImageGStreamer::create(GRefPtr<GstSample>(sample));
++
+     GRefPtr caps = adoptGRef(gst_caps_new_simple("video/x-raw", "format", G_TYPE_STRING, format.characters(), "framerate", GST_TYPE_FRACTION, GST_VIDEO_INFO_FPS_N(&videoInfo), GST_VIDEO_INFO_FPS_D(&videoInfo), "width", G_TYPE_INT, GST_VIDEO_INFO_WIDTH(&videoInfo), "height", G_TYPE_INT, GST_VIDEO_INFO_HEIGHT(&videoInfo), nullptr));
+     auto convertedSample = GStreamerVideoFrameConverter::singleton().convert(sample, caps);
+     if (!convertedSample)
+diff --git a/Source/WebCore/platform/graphics/gstreamer/mse/AppendPipeline.cpp b/Source/WebCore/platform/graphics/gstreamer/mse/AppendPipeline.cpp
+index 28a55a44d1..75ef58f518 100644
+--- a/Source/WebCore/platform/graphics/gstreamer/mse/AppendPipeline.cpp
++++ b/Source/WebCore/platform/graphics/gstreamer/mse/AppendPipeline.cpp
+@@ -258,7 +258,6 @@ void AppendPipeline::configureOptionalDemuxerFromAnyThread()
+ AppendPipeline::AppendPipeline(SourceBufferPrivateGStreamer& sourceBufferPrivate, MediaPlayerPrivateGStreamerMSE& playerPrivate)
+     : m_sourceBufferPrivate(sourceBufferPrivate)
+     , m_playerPrivate(&playerPrivate)
+-    , m_wasBusAlreadyNotifiedOfAvailableSamples(false)
+ {
+     ASSERT(isMainThread());
+     std::call_once(s_staticInitializationFlag, AppendPipeline::staticInitialization);
+diff --git a/Source/WebKit/PlatformWin.cmake b/Source/WebKit/PlatformWin.cmake
+index 9135f7b80b..e2685b6d5d 100644
+--- a/Source/WebKit/PlatformWin.cmake
++++ b/Source/WebKit/PlatformWin.cmake
+@@ -8,6 +8,8 @@ include(Platform/Curl.cmake)
+ include(Platform/WC.cmake)
+ 
+ list(APPEND WebKit_SOURCES
++    GPUProcess/media/RemoteAudioDestinationManager.cpp
++
+     GPUProcess/media/win/RemoteMediaPlayerProxyWin.cpp
+ 
+     GPUProcess/win/GPUProcessMainWin.cpp
+@@ -114,6 +116,14 @@ list(APPEND WebKit_PUBLIC_FRAMEWORK_HEADERS
+     UIProcess/API/C/win/WKView.h
+ )
+ 
++if (USE_GSTREAMER)
++    # WebCore headers used here (SharedBuffer.h among them) include GStreamer's.
++    list(APPEND WebKit_SYSTEM_INCLUDE_DIRECTORIES
++        ${GSTREAMER_INCLUDE_DIRS}
++        ${GSTREAMER_PBUTILS_INCLUDE_DIRS}
++    )
++endif ()
++
+ list(APPEND WebKit_PRIVATE_LIBRARIES
+     comctl32
+ )
+diff --git a/Source/cmake/GStreamerChecks.cmake b/Source/cmake/GStreamerChecks.cmake
+index c996248221..bedd0e7641 100644
+--- a/Source/cmake/GStreamerChecks.cmake
++++ b/Source/cmake/GStreamerChecks.cmake
+@@ -9,7 +9,10 @@ if (USE_GSTREAMER)
+       else ()
+           set(GSTREAMER_COMPONENTS app pbutils)
+           if (ENABLE_VIDEO)
+-              list(APPEND GSTREAMER_COMPONENTS video mpegts tag gl)
++              list(APPEND GSTREAMER_COMPONENTS video mpegts tag)
++              if (USE_GSTREAMER_GL)
++                  list(APPEND GSTREAMER_COMPONENTS gl)
++              endif ()
+           endif ()
+ 
+           if (ENABLE_WEB_AUDIO)
+diff --git a/Source/cmake/OptionsWin.cmake b/Source/cmake/OptionsWin.cmake
+index 77e1702632..cefb115ec4 100644
+--- a/Source/cmake/OptionsWin.cmake
++++ b/Source/cmake/OptionsWin.cmake
+@@ -59,6 +59,14 @@ endif ()
+ 
+ WEBKIT_OPTION_BEGIN()
+ 
++# Media: WebKit's GStreamer backend, as on the GTK and WPE ports. This turns
++# on Media Source Extensions and Web Audio, which Media Foundation lacks.
++include(GStreamerDefinitions)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(USE_GSTREAMER_GL PRIVATE OFF)
++WEBKIT_OPTION_DEPEND(ENABLE_MEDIA_SOURCE USE_GSTREAMER)
++WEBKIT_OPTION_DEPEND(ENABLE_WEB_AUDIO USE_GSTREAMER)
++WEBKIT_OPTION_DEPEND(USE_GSTREAMER_GL ENABLE_VIDEO)
++
+ WEBKIT_OPTION_DEFINE(USE_SKIA_OPENTYPE_SVG "Whether to use the Skia built-in support for OpenType SVG fonts." PUBLIC ON)
+ WEBKIT_OPTION_DEPEND(USE_SKIA_OPENTYPE_SVG USE_SKIA)
+ 
+@@ -75,17 +83,14 @@ WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_GAMEPAD PUBLIC OFF)
+ WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_GEOLOCATION PUBLIC ON)
+ WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_LAYOUT_TESTS PUBLIC ON)
+ WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MATHML PUBLIC ON)
+-WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MEDIA_SOURCE PUBLIC OFF)
+ WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MEDIA_STATISTICS PUBLIC ON)
+ WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MINIBROWSER PUBLIC ON)
+ WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_MOUSE_CURSOR_SCALE PUBLIC ON)
+ WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_PERIODIC_MEMORY_MONITOR PRIVATE ON)
+-WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_VIDEO PUBLIC ON)
+ WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEBASSEMBLY PRIVATE ON)
+ WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEBASSEMBLY_BBQJIT PRIVATE ON)
+ WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEBASSEMBLY_OMGJIT PRIVATE ON)
+ WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEBKIT_OVERFLOW_SCROLLING_CSS_PROPERTY PUBLIC OFF)
+-WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEB_AUDIO PUBLIC OFF)
+ WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_XSLT PUBLIC ON)
+ 
+ WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_SMOOTH_SCROLLING PRIVATE OFF)
+@@ -129,7 +134,11 @@ SET_AND_EXPOSE_TO_BUILD(USE_HARFBUZZ ON)
+ SET_AND_EXPOSE_TO_BUILD(USE_OPENSSL ON)
+ SET_AND_EXPOSE_TO_BUILD(USE_TEXTURE_MAPPER ON)
+ SET_AND_EXPOSE_TO_BUILD(USE_THEME_ADWAITA ON)
+-SET_AND_EXPOSE_TO_BUILD(USE_MEDIA_FOUNDATION ${ENABLE_VIDEO})
++if (USE_GSTREAMER)
++    SET_AND_EXPOSE_TO_BUILD(USE_MEDIA_FOUNDATION OFF)
++else ()
++    SET_AND_EXPOSE_TO_BUILD(USE_MEDIA_FOUNDATION ${ENABLE_VIDEO})
++endif ()
+ SET_AND_EXPOSE_TO_BUILD(USE_INSPECTOR_SOCKET_SERVER ${ENABLE_REMOTE_INSPECTOR})
+ SET_AND_EXPOSE_TO_BUILD(HAVE_GL_FENCE ON)
+ SET_AND_EXPOSE_TO_BUILD(ENABLE_DEVELOPER_MODE ${DEVELOPER_MODE})
+@@ -145,6 +154,20 @@ if (ENABLE_XSLT)
+     find_package(LibXslt 1.1.32 REQUIRED)
+ endif ()
+ 
++if (USE_GSTREAMER)
++    # GStreamer and GLib are located through their pkg-config files, which
++    # vcpkg installs along with a pkgconf for the build machine.
++    if (DEFINED VCPKG_INSTALLED_DIR)
++        find_program(VCPKG_PKGCONF_EXECUTABLE NAMES pkgconf
++            PATHS "${VCPKG_INSTALLED_DIR}/${VCPKG_HOST_TRIPLET}/tools/pkgconf" NO_DEFAULT_PATH)
++        if (VCPKG_PKGCONF_EXECUTABLE)
++            set(PKG_CONFIG_EXECUTABLE "${VCPKG_PKGCONF_EXECUTABLE}" CACHE FILEPATH "pkg-config" FORCE)
++        endif ()
++    endif ()
++    find_package(GLib 2.70.0 REQUIRED COMPONENTS Gio Object Thread Module)
++    include(GStreamerChecks)
++endif ()
++
+ if (USE_AVIF)
+     find_package(AVIF 0.9.0)
+     if (NOT AVIF_FOUND)

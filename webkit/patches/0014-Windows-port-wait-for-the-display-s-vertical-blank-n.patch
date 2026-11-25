@@ -1,0 +1,75 @@
+From b4dcd7884db3c583ac88f99a0a8dfbe34bf02877 Mon Sep 17 00:00:00 2001
+From: webby <webby@localhost>
+Date: Wed, 25 Nov 2026 21:44:22 +0800
+Subject: [PATCH 14/15] Windows port: wait for the display's vertical blank,
+ not for DWM
+
+DwmFlush() stops returning at a regular rate while a fullscreen window is shown
+directly, without being composed. Wait on the primary output's vertical blank
+(IDXGIOutput::WaitForVBlank) and keep DwmFlush as the fallback.
+---
+ .../graphics/win/DisplayRefreshMonitorWin.cpp | 27 ++++++++++++++++---
+ 1 file changed, 24 insertions(+), 3 deletions(-)
+
+diff --git a/Source/WebCore/platform/graphics/win/DisplayRefreshMonitorWin.cpp b/Source/WebCore/platform/graphics/win/DisplayRefreshMonitorWin.cpp
+index 5e8fa65892..725350efdf 100644
+--- a/Source/WebCore/platform/graphics/win/DisplayRefreshMonitorWin.cpp
++++ b/Source/WebCore/platform/graphics/win/DisplayRefreshMonitorWin.cpp
+@@ -27,6 +27,8 @@
+ #include "DisplayRefreshMonitorWin.h"
+ 
+ #include <dwmapi.h>
++#include <dxgi.h>
++#include <wrl/client.h>
+ #include <wtf/MainThread.h>
+ #include <wtf/Threading.h>
+ #include <wtf/ThreadSafeWeakPtr.h>
+@@ -76,7 +78,23 @@ DisplayRefreshMonitorWin::~DisplayRefreshMonitorWin()
+ 
+ // Rendering updates used to be paced by a 16ms run loop timer. That drifts against the display,
+ // so frames reached the screen unevenly, and a timer cannot follow a display that is not 60Hz.
+-// DwmFlush() returns when the desktop compositor has presented, once per refresh of the display.
++// Wait for the vertical blank of the display instead. The desktop compositor's own signal
++// (DwmFlush) is the fallback only: it stops being regular while a fullscreen window is shown
++// directly, without being composed.
++static Microsoft::WRL::ComPtr<IDXGIOutput> primaryOutput()
++{
++    Microsoft::WRL::ComPtr<IDXGIFactory1> factory;
++    Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
++    Microsoft::WRL::ComPtr<IDXGIOutput> output;
++    if (FAILED(::CreateDXGIFactory1(IID_PPV_ARGS(&factory))))
++        return nullptr;
++    for (UINT i = 0; factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i) {
++        if (SUCCEEDED(adapter->EnumOutputs(0, &output)))
++            return output;
++    }
++    return nullptr;
++}
++
+ bool DisplayRefreshMonitorWin::startNotificationMechanism()
+ {
+     Locker locker { m_state->lock };
+@@ -87,6 +105,7 @@ bool DisplayRefreshMonitorWin::startNotificationMechanism()
+     m_didStartThread = true;
+ 
+     Thread::create("DisplayRefreshMonitorWin"_s, [state = m_state, weakThis = ThreadSafeWeakPtr { *this }] {
++        auto output = primaryOutput();
+         while (true) {
+             FramesPerSecond rate;
+             {
+@@ -98,8 +117,10 @@ bool DisplayRefreshMonitorWin::startNotificationMechanism()
+                 rate = state->currentUpdate.updatesPerSecond;
+             }
+ 
+-            if (FAILED(::DwmFlush()))
+-                ::Sleep(1000 / rate);
++            if (!output || FAILED(output->WaitForVBlank())) {
++                if (FAILED(::DwmFlush()))
++                    ::Sleep(1000 / rate);
++            }
+ 
+             DisplayUpdate update;
+             {
+-- 
+2.56.1.windows.1
+

@@ -1,0 +1,253 @@
+From bb00d86a5f3d9fc59a4661b6c1d218569ee46824 Mon Sep 17 00:00:00 2001
+From: webby <webby@localhost>
+Date: Wed, 25 Nov 2026 20:52:41 +0800
+Subject: [PATCH 11/13] Windows port: pace rendering updates by the display, at
+ its real refresh rate
+
+Rendering updates were paced by a 16ms run loop timer. A timer drifts against
+the display, so frames reached the screen at uneven intervals, and it cannot
+follow a display that is not 60Hz. DisplayRefreshMonitorWin now waits for the
+desktop compositor to present (DwmFlush) on a thread of its own and reports the
+display's refresh rate, and the UI process tells pages that rate, without which
+a page assumes 60Hz.
+---
+ Source/WebCore/PlatformWin.cmake              |  1 +
+ .../graphics/win/DisplayRefreshMonitorWin.cpp | 90 +++++++++++++++++--
+ .../graphics/win/DisplayRefreshMonitorWin.h   | 25 ++++--
+ .../UIProcess/wc/DrawingAreaProxyWC.cpp       | 14 +++
+ .../WebKit/UIProcess/wc/DrawingAreaProxyWC.h  |  1 +
+ 5 files changed, 116 insertions(+), 15 deletions(-)
+
+diff --git a/Source/WebCore/PlatformWin.cmake b/Source/WebCore/PlatformWin.cmake
+index 426a495cdf..5e4a3b0c8d 100644
+--- a/Source/WebCore/PlatformWin.cmake
++++ b/Source/WebCore/PlatformWin.cmake
+@@ -152,6 +152,7 @@ list(APPEND WebCore_PRIVATE_FRAMEWORK_HEADERS
+ 
+ list(APPEND WebCore_LIBRARIES
+     crypt32
++    dwmapi
+     iphlpapi
+     ole32
+     usp10
+diff --git a/Source/WebCore/platform/graphics/win/DisplayRefreshMonitorWin.cpp b/Source/WebCore/platform/graphics/win/DisplayRefreshMonitorWin.cpp
+index c85a6d9661..5e8fa65892 100644
+--- a/Source/WebCore/platform/graphics/win/DisplayRefreshMonitorWin.cpp
++++ b/Source/WebCore/platform/graphics/win/DisplayRefreshMonitorWin.cpp
+@@ -26,10 +26,27 @@
+ #include "config.h"
+ #include "DisplayRefreshMonitorWin.h"
+ 
++#include <dwmapi.h>
++#include <wtf/MainThread.h>
++#include <wtf/Threading.h>
++#include <wtf/ThreadSafeWeakPtr.h>
++
+ namespace WebCore {
+ 
+ constexpr FramesPerSecond DefaultFramesPerSecond = 60;
+ 
++static FramesPerSecond displayRefreshRate()
++{
++    DWM_TIMING_INFO info { };
++    info.cbSize = sizeof(info);
++    if (SUCCEEDED(::DwmGetCompositionTimingInfo(nullptr, &info)) && info.rateRefresh.uiDenominator) {
++        auto rate = std::lround(static_cast<double>(info.rateRefresh.uiNumerator) / info.rateRefresh.uiDenominator);
++        if (rate >= 24 && rate <= 1000)
++            return rate;
++    }
++    return DefaultFramesPerSecond;
++}
++
+ RefPtr<DisplayRefreshMonitorWin> DisplayRefreshMonitorWin::create(PlatformDisplayID displayID)
+ {
+     return adoptRef(*new DisplayRefreshMonitorWin(displayID));
+@@ -37,28 +54,85 @@ RefPtr<DisplayRefreshMonitorWin> DisplayRefreshMonitorWin::create(PlatformDispla
+ 
+ DisplayRefreshMonitorWin::DisplayRefreshMonitorWin(PlatformDisplayID displayID)
+     : DisplayRefreshMonitor(displayID)
+-    , m_timer(RunLoop::mainSingleton(), "DisplayRefreshMonitorWin::Timer"_s, this, &DisplayRefreshMonitorWin::displayLinkCallbackFired)
+-    , m_currentUpdate({ 0, DefaultFramesPerSecond })
++    , m_state(adoptRef(*new VSyncState))
+ {
++    {
++        Locker locker { m_state->lock };
++        m_state->currentUpdate = { 0, displayRefreshRate() };
++    }
++    // A client that wants fewer updates than the display makes (60 a second on a 120Hz display,
++    // or a throttled page) skips some refreshes without asking again. Keep going through those
++    // rather than stopping at the first refresh nobody took.
++    Locker locker { lock() };
++    setMaxUnscheduledFireCount(20);
+ }
+ 
+-void DisplayRefreshMonitorWin::displayLinkCallbackFired()
++DisplayRefreshMonitorWin::~DisplayRefreshMonitorWin()
+ {
+-    displayLinkFired(m_currentUpdate);
+-    m_currentUpdate = m_currentUpdate.nextUpdate();
++    Locker locker { m_state->lock };
++    m_state->shutdown = true;
++    m_state->condition.notifyAll();
+ }
+ 
++// Rendering updates used to be paced by a 16ms run loop timer. That drifts against the display,
++// so frames reached the screen unevenly, and a timer cannot follow a display that is not 60Hz.
++// DwmFlush() returns when the desktop compositor has presented, once per refresh of the display.
+ bool DisplayRefreshMonitorWin::startNotificationMechanism()
+ {
+-    if (!m_timer.isActive())
+-        m_timer.startRepeating(16_ms);
++    Locker locker { m_state->lock };
++    m_state->active = true;
++    m_state->condition.notifyAll();
++    if (m_didStartThread)
++        return true;
++    m_didStartThread = true;
++
++    Thread::create("DisplayRefreshMonitorWin"_s, [state = m_state, weakThis = ThreadSafeWeakPtr { *this }] {
++        while (true) {
++            FramesPerSecond rate;
++            {
++                Locker locker { state->lock };
++                while (!state->active && !state->shutdown)
++                    state->condition.wait(state->lock);
++                if (state->shutdown)
++                    return;
++                rate = state->currentUpdate.updatesPerSecond;
++            }
+ 
++            if (FAILED(::DwmFlush()))
++                ::Sleep(1000 / rate);
++
++            DisplayUpdate update;
++            {
++                Locker locker { state->lock };
++                if (!state->active || state->shutdown)
++                    continue;
++                update = state->currentUpdate;
++                state->currentUpdate = update.nextUpdate();
++            }
++
++            RefPtr monitor = weakThis.get();
++            if (!monitor)
++                return;
++            monitor->displayLinkFired(update);
++            // The monitor belongs to the main thread; do not let this thread drop the last reference.
++            callOnMainThread([monitor = WTF::move(monitor)] { });
++        }
++    })->detach();
+     return true;
+ }
+ 
++void DisplayRefreshMonitorWin::dispatchDisplayDidRefresh(const DisplayUpdate& update)
++{
++    // Called on the thread that waits for the display.
++    callOnMainThread([protectedThis = Ref { *this }, update] {
++        protectedThis->displayDidRefresh(update);
++    });
++}
++
+ void DisplayRefreshMonitorWin::stopNotificationMechanism()
+ {
+-    m_timer.stop();
++    Locker locker { m_state->lock };
++    m_state->active = false;
+ }
+ 
+ } // namespace WebCore
+diff --git a/Source/WebCore/platform/graphics/win/DisplayRefreshMonitorWin.h b/Source/WebCore/platform/graphics/win/DisplayRefreshMonitorWin.h
+index 356c84d964..55a457f438 100644
+--- a/Source/WebCore/platform/graphics/win/DisplayRefreshMonitorWin.h
++++ b/Source/WebCore/platform/graphics/win/DisplayRefreshMonitorWin.h
+@@ -26,25 +26,36 @@
+ #pragma once
+ 
+ #include "DisplayRefreshMonitor.h"
+-#include <wtf/CanMakeWeakPtr.h>
+-#include <wtf/RunLoop.h>
++#include <wtf/Condition.h>
++#include <wtf/Lock.h>
++#include <wtf/ThreadSafeRefCounted.h>
+ 
+ namespace WebCore {
+ 
+-class DisplayRefreshMonitorWin : public DisplayRefreshMonitor, public CanMakeWeakPtr<DisplayRefreshMonitorWin> {
++class DisplayRefreshMonitorWin : public DisplayRefreshMonitor {
+ public:
+     static RefPtr<DisplayRefreshMonitorWin> create(PlatformDisplayID);
+ 
+ private:
+     explicit DisplayRefreshMonitorWin(PlatformDisplayID);
++    ~DisplayRefreshMonitorWin();
+ 
+     bool startNotificationMechanism() final;
+     void stopNotificationMechanism() final;
++    void dispatchDisplayDidRefresh(const DisplayUpdate&) final;
+     
+-    void displayLinkCallbackFired();
+-
+-    RunLoop::Timer m_timer;
+-    DisplayUpdate m_currentUpdate;
++    // What the thread that waits for the display shares with the monitor. The thread owns a
++    // reference to this, not to the monitor, so the monitor can go away while the thread waits.
++    struct VSyncState : public ThreadSafeRefCounted<VSyncState> {
++        Lock lock;
++        Condition condition;
++        bool active WTF_GUARDED_BY_LOCK(lock) { false };
++        bool shutdown WTF_GUARDED_BY_LOCK(lock) { false };
++        DisplayUpdate currentUpdate WTF_GUARDED_BY_LOCK(lock);
++    };
++
++    const Ref<VSyncState> m_state;
++    bool m_didStartThread { false };
+ };
+ 
+ } // namespace WebCore
+diff --git a/Source/WebKit/UIProcess/wc/DrawingAreaProxyWC.cpp b/Source/WebKit/UIProcess/wc/DrawingAreaProxyWC.cpp
+index 2a5f7ebbd1..8b35c09b8b 100644
+--- a/Source/WebKit/UIProcess/wc/DrawingAreaProxyWC.cpp
++++ b/Source/WebKit/UIProcess/wc/DrawingAreaProxyWC.cpp
+@@ -36,6 +36,7 @@
+ #include "UpdateInfo.h"
+ #include "WebPageProxy.h"
+ #include <WebCore/Region.h>
++#include <dwmapi.h>
+ 
+ namespace WebKit {
+ 
+@@ -46,6 +47,19 @@ Ref<DrawingAreaProxyWC> DrawingAreaProxyWC::create(WebPageProxy& page, WebProces
+     return adoptRef(*new DrawingAreaProxyWC(page, webProcessProxy));
+ }
+ 
++// Without this a page assumes a 60Hz display and updates no more than 60 times a second.
++std::optional<WebCore::FramesPerSecond> DrawingAreaProxyWC::displayNominalFramesPerSecond()
++{
++    DWM_TIMING_INFO info { };
++    info.cbSize = sizeof(info);
++    if (FAILED(::DwmGetCompositionTimingInfo(nullptr, &info)) || !info.rateRefresh.uiDenominator)
++        return std::nullopt;
++    auto rate = std::lround(static_cast<double>(info.rateRefresh.uiNumerator) / info.rateRefresh.uiDenominator);
++    if (rate < 24 || rate > 1000)
++        return std::nullopt;
++    return static_cast<WebCore::FramesPerSecond>(rate);
++}
++
+ DrawingAreaProxyWC::DrawingAreaProxyWC(WebPageProxy& webPageProxy, WebProcessProxy& webProcessProxy)
+     : DrawingAreaProxy(webPageProxy, webProcessProxy)
+ {
+diff --git a/Source/WebKit/UIProcess/wc/DrawingAreaProxyWC.h b/Source/WebKit/UIProcess/wc/DrawingAreaProxyWC.h
+index 5ede972f4b..0e0f0242df 100644
+--- a/Source/WebKit/UIProcess/wc/DrawingAreaProxyWC.h
++++ b/Source/WebKit/UIProcess/wc/DrawingAreaProxyWC.h
+@@ -57,6 +57,7 @@ private:
+     void deviceScaleFactorDidChange(CompletionHandler<void()>&&) override;
+     void sizeDidChange() override;
+     bool shouldSendWheelEventsToEventDispatcher() const final { return true; }
++    std::optional<WebCore::FramesPerSecond> displayNominalFramesPerSecond() final;
+ 
+     // message handers
+     void update(uint64_t, UpdateInfo&&) override;
+-- 
+2.56.1.windows.1
+

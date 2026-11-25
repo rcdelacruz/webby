@@ -1,0 +1,118 @@
+From 13347d466fc9e370b182c338f53fdddb0192d8ba Mon Sep 17 00:00:00 2001
+From: webby <webby@localhost>
+Date: Wed, 25 Nov 2026 20:52:42 +0800
+Subject: [PATCH 12/13] WC compositor: scrolling moves layers instead of
+ repainting the page
+
+This port scrolls on the main thread and paints tiles on the CPU, so anything
+that repaints at every step of a scroll is slow. Three things did.
+
+Each step moved the layout viewport, which marked every sticky and fixed box as
+needing layout. Laying them out repainted each one and the containers they sit
+in: with one sticky sidebar, about twelve tiles a step. A sticky box takes its
+offset from the viewport when layer positions are updated, not from layout, and
+a fixed box only moves, so ask for neither a layout of sticky boxes nor more
+than a movement-only layout of fixed ones.
+
+Sticky boxes were never given a layer of their own, because that was tied to
+having a scrolling thread. The main thread moves a composited sticky layer in
+the same commit as the scroll.
+
+A scrollable box (overflow: auto) repainted everything it showed at every step.
+Turn on composited overflow scrolling, and since nothing but the main thread
+moves the scrolled layer here, set its position on a user scroll too rather
+than only recording it.
+---
+ Source/WebCore/page/LocalFrameView.cpp        | 22 +++++++++++++++++--
+ .../WebCore/rendering/RenderLayerBacking.cpp  |  9 +++++++-
+ .../rendering/RenderLayerCompositor.cpp       |  5 +++++
+ .../WebProcess/WebPage/wc/DrawingAreaWC.cpp   |  3 +++
+ 4 files changed, 36 insertions(+), 3 deletions(-)
+
+diff --git a/Source/WebCore/page/LocalFrameView.cpp b/Source/WebCore/page/LocalFrameView.cpp
+index 2655a3897c..c9471c0eda 100644
+--- a/Source/WebCore/page/LocalFrameView.cpp
++++ b/Source/WebCore/page/LocalFrameView.cpp
+@@ -1958,9 +1958,27 @@ void LocalFrameView::setBaseLayoutViewportOrigin(LayoutPoint origin, TriggerLayo
+         return;
+ 
+     m_layoutViewportOrigin = origin;
+-    if (layoutTriggering == TriggerLayoutOrNot::Yes)
++    if (layoutTriggering == TriggerLayoutOrNot::Yes) {
++#if USE(GRAPHICS_LAYER_WC)
++        // This port scrolls on the main thread, so the layout viewport moves at every step of
++        // a scroll. A sticky box takes its offset from the viewport when layer positions are
++        // updated after the scroll, not from layout, and a fixed box only moves. Asking for a
++        // full layout of them repaints each one, and the containers they sit in, at every step.
++        if (hasViewportConstrainedObjects()) {
++            for (CheckedRef renderer : *m_viewportConstrainedObjects) {
++                if (renderer->isFixedPositioned())
++                    renderer->setNeedsOutOfFlowMovementLayout(nullptr);
++                else if (!renderer->isStickilyPositioned())
++                    renderer->setNeedsLayout();
++                if (renderer->hasLayer())
++                    downcast<RenderBoxModelObject>(renderer).layer()->setNeedsCompositingGeometryUpdate();
++            }
++        }
++#else
+         setViewportConstrainedObjectsNeedLayout();
+-    
++#endif
++    }
++
+     if (CheckedPtr tiledBacking = this->tiledBacking()) {
+         FloatRect layoutViewport = layoutViewportRect();
+         layoutViewport.moveBy(unscaledScrollOrigin()); // tiledBacking deals in top-left relative coordinates.
+diff --git a/Source/WebCore/rendering/RenderLayerBacking.cpp b/Source/WebCore/rendering/RenderLayerBacking.cpp
+index 2dcd20f17e..1f9fa7dec3 100644
+--- a/Source/WebCore/rendering/RenderLayerBacking.cpp
++++ b/Source/WebCore/rendering/RenderLayerBacking.cpp
+@@ -2181,7 +2181,14 @@ void RenderLayerBacking::updateScrollOffset(ScrollOffset scrollOffset)
+     auto* scrollableArea = m_owningLayer.scrollableArea();
+     ASSERT(scrollableArea);
+ 
+-    if (scrollableArea->currentScrollType() == ScrollType::User) {
++#if USE(GRAPHICS_LAYER_WC)
++    // This port has no scrolling thread: a scroll the user makes is carried out here, on the
++    // main thread, and nothing else is going to move the layer.
++    bool scrolledExternally = false;
++#else
++    bool scrolledExternally = scrollableArea->currentScrollType() == ScrollType::User;
++#endif
++    if (scrolledExternally) {
+         // If scrolling is happening externally, we don't want to touch the layer bounds origin here because that will cause jitter.
+         setLocationOfScrolledContents(scrollOffset, ScrollingLayerPositionAction::Sync);
+         scrollableArea->setRequiresScrollPositionReconciliation(true);
+diff --git a/Source/WebCore/rendering/RenderLayerCompositor.cpp b/Source/WebCore/rendering/RenderLayerCompositor.cpp
+index cec4817424..09e44923fa 100644
+--- a/Source/WebCore/rendering/RenderLayerCompositor.cpp
++++ b/Source/WebCore/rendering/RenderLayerCompositor.cpp
+@@ -4504,6 +4504,11 @@ bool RenderLayerCompositor::isAsyncScrollableStickyLayer(const RenderLayer& laye
+ #if PLATFORM(IOS_FAMILY)
+     // iOS WK1 has fixed/sticky support in the main frame via WebFixedPositionContent.
+     return isMainFrameCompositor();
++#elif USE(GRAPHICS_LAYER_WC)
++    // This port scrolls on the main thread, which moves a composited sticky layer in the same
++    // commit as the scroll. Without a layer of its own the sticky box and everything under it
++    // is repainted at every step of a scroll.
++    return true;
+ #else
+     return false;
+ #endif
+diff --git a/Source/WebKit/WebProcess/WebPage/wc/DrawingAreaWC.cpp b/Source/WebKit/WebProcess/WebPage/wc/DrawingAreaWC.cpp
+index c0c6a216fb..95bdaa66c0 100644
+--- a/Source/WebKit/WebProcess/WebPage/wc/DrawingAreaWC.cpp
++++ b/Source/WebKit/WebProcess/WebPage/wc/DrawingAreaWC.cpp
+@@ -122,6 +122,9 @@ void DrawingAreaWC::updatePreferences(const WebPreferencesStore& store)
+ {
+     Settings& settings = m_webPage->corePage()->settings();
+     settings.setAcceleratedCompositingForFixedPositionEnabled(settings.acceleratedCompositingEnabled());
++    // Give the contents of a scrollable box a layer of their own. Scrolling still happens on the
++    // main thread, but it moves that layer instead of repainting everything the box shows.
++    settings.setAsyncOverflowScrollingEnabled(settings.acceleratedCompositingEnabled());
+     settings.setForceCompositingMode(store.getBoolValueForKey(WebPreferencesKey::siteIsolationEnabledKey()));
+ }
+ 
+-- 
+2.56.1.windows.1
+

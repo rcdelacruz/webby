@@ -1,0 +1,58 @@
+From 1ed915a6bc81b4170626a9a10a2c1f818bfa8c06 Mon Sep 17 00:00:00 2001
+From: webby <webby@localhost>
+Date: Wed, 25 Nov 2026 20:52:38 +0800
+Subject: [PATCH 09/13] Windows run loop: wait on a high resolution timer
+
+RunLoop::run() slept in MsgWaitForMultipleObjectsEx with a millisecond timeout,
+which Windows rounds up to its timer tick: 15.6ms unless something in the process
+has asked for a finer one. A 16ms timer therefore fired every 31ms, and everything
+paced by a run loop timer in the web process ran at about 30 a second on pages
+that do not themselves keep a fast JavaScript timer going. Wait on a high
+resolution waitable timer instead; it does not depend on the tick.
+---
+ Source/WTF/wtf/win/RunLoopWin.cpp | 18 ++++++++++++++++--
+ 1 file changed, 16 insertions(+), 2 deletions(-)
+
+diff --git a/Source/WTF/wtf/win/RunLoopWin.cpp b/Source/WTF/wtf/win/RunLoopWin.cpp
+index b51e97f817..723a82118f 100644
+--- a/Source/WTF/wtf/win/RunLoopWin.cpp
++++ b/Source/WTF/wtf/win/RunLoopWin.cpp
+@@ -77,19 +77,33 @@ LRESULT RunLoop::wndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
+ void RunLoop::run()
+ {
+     auto& runLoop = RunLoop::currentSingleton();
++    // The timeout of MsgWaitForMultipleObjectsEx is rounded up to the system timer tick, 15.6ms
++    // unless something in the process has asked for a finer one. That turns the 16ms timer that
++    // paces rendering updates into a 31ms one. A high resolution waitable timer does not depend
++    // on the tick.
++    HANDLE waitTimer = ::CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+     while (true) {
+         runLoop.fireTimers();
+         MSG message;
+         while (BOOL result = ::PeekMessage(&message, nullptr, 0, 0, PM_REMOVE)) {
+             if (result == -1)
+                 break;
+-            if (message.message == WM_QUIT)
++            if (message.message == WM_QUIT) {
++                if (waitTimer)
++                    ::CloseHandle(waitTimer);
+                 return;
++            }
+             runLoop.dispatchMessage(message);
+         }
+ 
+         DWORD timeout = runLoop.msTillNextTimer();
+-        if (timeout > 0)
++        if (!timeout)
++            continue;
++        LARGE_INTEGER dueTime;
++        dueTime.QuadPart = -static_cast<LONGLONG>(timeout) * 10000;
++        if (waitTimer && ::SetWaitableTimerEx(waitTimer, &dueTime, 0, nullptr, nullptr, nullptr, 0))
++            ::MsgWaitForMultipleObjectsEx(1, &waitTimer, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
++        else
+             ::MsgWaitForMultipleObjectsEx(0, nullptr, timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+     }
+ }
+-- 
+2.56.1.windows.1
+

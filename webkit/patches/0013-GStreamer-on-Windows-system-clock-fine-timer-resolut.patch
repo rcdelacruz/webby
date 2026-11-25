@@ -1,0 +1,182 @@
+From d709ba8c976e2e86e3d9e878140dfa90136e6b65 Mon Sep 17 00:00:00 2001
+From: webby <webby@localhost>
+Date: Wed, 25 Nov 2026 20:52:44 +0800
+Subject: [PATCH 13/13] GStreamer on Windows: system clock, fine timer
+ resolution, threaded conversion
+
+Three changes to how the player times and moves video frames on Windows.
+
+A Windows audio sink keeps time from the position of the device, which advances
+one 10ms period at a time. Video frames timed against that were released in 10ms
+steps, and at 60fps the decoder skipped the frames it took to be late. Run the
+pipeline on the system clock and have the audio sink follow it by resampling.
+
+GStreamer's clock waits on a condition variable, whose timeout Windows rounds up
+to a 15.6ms tick unless the process asks for a finer one. Ask for 1ms while a
+pipeline is playing.
+
+Decoding, the conversion with its read back from the GPU, and the sink ran one
+after the other on one streaming thread. Put a queue on either side of the
+conversion.
+---
+ .../gstreamer/MediaPlayerPrivateGStreamer.cpp | 65 +++++++++++++++++--
+ .../gstreamer/MediaPlayerPrivateGStreamer.h   |  4 ++
+ 2 files changed, 65 insertions(+), 4 deletions(-)
+
+diff --git a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
+index 6020352307..e426192177 100644
+--- a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
++++ b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
+@@ -25,6 +25,11 @@
+ 
+ #include "config.h"
+ #include "MediaPlayerPrivateGStreamer.h"
++
++#if OS(WINDOWS)
++#include <windows.h>
++#include <timeapi.h>
++#endif
+ #include "TrackPrivateBaseGStreamer.h"
+ #include <optional>
+ 
+@@ -86,6 +91,7 @@
+ 
+ #include <cstring>
+ #include <glib.h>
++#include <gst/audio/gstaudiobasesink.h>
+ #include <gst/audio/streamvolume.h>
+ #include <gst/gst.h>
+ #include <gst/pbutils/missing-plugins.h>
+@@ -214,7 +220,26 @@ MediaPlayerPrivateGStreamer::MediaPlayerPrivateGStreamer(MediaPlayer& player)
+ MediaPlayerPrivateGStreamer::~MediaPlayerPrivateGStreamer()
+ {
+     tearDown(true);
++#if OS(WINDOWS)
++    setNeedsFineTimerResolution(false);
++#endif
++}
++
++#if OS(WINDOWS)
++// GStreamer's clock waits on a condition variable, and Windows rounds that timeout up to its
++// timer tick: 15.6ms unless the process asks for a finer one. A video sink that wakes that late
++// shows frames at uneven intervals, and at 60fps the decoder skips frames to catch up.
++void MediaPlayerPrivateGStreamer::setNeedsFineTimerResolution(bool needed)
++{
++    if (needed == m_hasFineTimerResolution)
++        return;
++    m_hasFineTimerResolution = needed;
++    if (needed)
++        ::timeBeginPeriod(1);
++    else
++        ::timeEndPeriod(1);
+ }
++#endif
+ 
+ void MediaPlayerPrivateGStreamer::tearDown(bool clearMediaPlayer)
+ {
+@@ -1228,6 +1253,9 @@ MediaPlayerPrivateGStreamer::ChangePipelineStateResult MediaPlayerPrivateGStream
+     }
+ 
+     m_isPipelinePlaying = newState == GST_STATE_PLAYING;
++#if OS(WINDOWS)
++    setNeedsFineTimerResolution(m_isPipelinePlaying);
++#endif
+ 
+     auto& quirksManager = GStreamerQuirksManager::singleton();
+     auto eosState = quirksManager.eosMediaPlayerState();
+@@ -2837,6 +2865,14 @@ void MediaPlayerPrivateGStreamer::configureElement(GstElement* element)
+ {
+     configureElementPlatformQuirks(element);
+ 
++#if OS(WINDOWS)
++    // The pipeline runs on the system clock (see createGSTPlayBin()). Have the audio sink follow
++    // it by resampling by the few parts per million the two clocks differ, rather than by
++    // skipping or repeating audio each time the difference has built up.
++    if (GST_IS_AUDIO_BASE_SINK(element))
++        gst_audio_base_sink_set_slave_method(GST_AUDIO_BASE_SINK(element), GST_AUDIO_BASE_SINK_SLAVE_RESAMPLE);
++#endif
++
+     auto name = GMallocString::unsafeAdoptFromUTF8(gst_element_get_name(element));
+     String elementClass = String::fromLatin1(unsafeSpan(gst_element_get_metadata(element, GST_ELEMENT_METADATA_KLASS)));
+     auto classifiers = elementClass.split('/');
+@@ -3714,6 +3750,16 @@ void MediaPlayerPrivateGStreamer::createGSTPlayBin(const URL& url)
+         gst_element_set_base_time(m_pipeline.get(), 0);
+         gst_element_set_start_time(m_pipeline.get(), GST_CLOCK_TIME_NONE);
+     }
++#if OS(WINDOWS)
++    else {
++        // A Windows audio sink keeps time from the position of the device, which advances one
++        // 10ms period at a time. Video frames timed against that are released in 10ms steps,
++        // unevenly, and at 60fps the decoder skips the frames it takes to be late. The system
++        // clock runs smoothly; the audio sink follows it (see configureElement()).
++        GRefPtr clock = adoptGRef(gst_system_clock_obtain());
++        gst_pipeline_use_clock(GST_PIPELINE(m_pipeline.get()), clock.get());
++    }
++#endif
+ 
+     auto streamVolume = GST_STREAM_VOLUME(m_pipeline.get());
+ 
+@@ -4413,6 +4459,9 @@ void MediaPlayerPrivateGStreamer::managePlayerSuspend()
+         gst_element_get_state(m_pipeline.get(), &currentState, &pendingState, 0);
+         GST_DEBUG_OBJECT(pipeline(), "Pipeline is now in %s state with %s pending", gst_state_get_name(currentState), gst_state_get_name(pendingState));
+         m_isPipelinePlaying = false;
++#if OS(WINDOWS)
++        setNeedsFineTimerResolution(false);
++#endif
+     } else if (!shouldBeSuspended && isSuspended()) {
+         m_isSuspended = false;
+ 
+@@ -4658,8 +4707,16 @@ static GstElement* wrapVideoSinkWithD3D11Conversion(GstElement* sink)
+     GRefPtr convert = gst_element_factory_make("d3d11convert", nullptr);
+     GRefPtr filter = gst_element_factory_make("capsfilter", nullptr);
+     GRefPtr download = gst_element_factory_make("d3d11download", nullptr);
+-    if (!upload || !convert || !filter || !download)
++    // Decoding, the conversion with its read back from the GPU, and the sink, which waits for
++    // the main thread to take each frame, would otherwise run one after the other on a single
++    // streaming thread. Together they take longer than the 16.7ms a 60fps frame has. A queue
++    // on either side of the conversion gives each of the three a thread of its own.
++    GRefPtr inputQueue = gst_element_factory_make("queue", nullptr);
++    GRefPtr outputQueue = gst_element_factory_make("queue", nullptr);
++    if (!upload || !convert || !filter || !download || !inputQueue || !outputQueue)
+         return nullptr;
++    g_object_set(inputQueue.get(), "max-size-buffers", 3, "max-size-bytes", 0, "max-size-time", static_cast<guint64>(0), nullptr);
++    g_object_set(outputQueue.get(), "max-size-buffers", 2, "max-size-bytes", 0, "max-size-time", static_cast<guint64>(0), nullptr);
+ 
+     // sRGB, so that the image made from a frame is in the colour space pages are painted
+     // in and drawing it needs no conversion of each pixel on the CPU.
+@@ -4668,14 +4725,14 @@ static GstElement* wrapVideoSinkWithD3D11Conversion(GstElement* sink)
+ 
+     // The bin is returned floating, as a new element is, for the pipeline to own.
+     auto* bin = gst_bin_new("webkit-video-sink-bin");
+-    gst_bin_add_many(GST_BIN_CAST(bin), upload.get(), convert.get(), filter.get(), download.get(), sink, nullptr);
+-    if (!gst_element_link_many(upload.get(), convert.get(), filter.get(), download.get(), sink, nullptr)) {
++    gst_bin_add_many(GST_BIN_CAST(bin), inputQueue.get(), upload.get(), convert.get(), filter.get(), download.get(), outputQueue.get(), sink, nullptr);
++    if (!gst_element_link_many(inputQueue.get(), upload.get(), convert.get(), filter.get(), download.get(), outputQueue.get(), sink, nullptr)) {
+         gst_bin_remove(GST_BIN_CAST(bin), sink);
+         gst_object_unref(bin);
+         return nullptr;
+     }
+ 
+-    GRefPtr pad = adoptGRef(gst_element_get_static_pad(upload.get(), "sink"));
++    GRefPtr pad = adoptGRef(gst_element_get_static_pad(inputQueue.get(), "sink"));
+     gst_element_add_pad(bin, gst_ghost_pad_new("sink", pad.get()));
+     return bin;
+ }
+diff --git a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.h b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.h
+index 60b0c6ace1..1efe58ffb0 100644
+--- a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.h
++++ b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.h
+@@ -418,6 +418,10 @@ protected:
+ 
+     // Must reflect whether the last successfull call to gst_element_set_state() was for PLAYING.
+     bool m_isPipelinePlaying = false;
++#if OS(WINDOWS)
++    void setNeedsFineTimerResolution(bool);
++    bool m_hasFineTimerResolution { false };
++#endif
+ 
+     // m_isPaused represents:
+     // A) In MSE streams, whether playback or pause has last been requested with pause() and play(),
+-- 
+2.56.1.windows.1
+

@@ -1,0 +1,168 @@
+From 6ebc076b70167c120fc7ae72894dc9976ef1cdc9 Mon Sep 17 00:00:00 2001
+From: webby <webby@localhost>
+Date: Wed, 25 Nov 2026 20:52:39 +0800
+Subject: [PATCH 10/13] WC compositor: whole-pixel tiles, no wait for the
+ display, reused frame memory
+
+Three changes to the Windows compositor.
+
+Tile updates were sized by scaling an integer rect, which truncates. At a
+fractional device scale factor (150% display scaling) the last row or column of
+a repainted rect kept its old contents, showing as thin lines across the page.
+Paint the enclosing rect of device pixels instead.
+
+The GPU process blocked in eglSwapBuffers() until the next refresh of the
+display. The web process waits for each update to be presented before sending
+the next, so that capped the update rate and delayed video frames. Use a swap
+interval of zero; the window is composed by DWM either way.
+
+The image of a video frame was copied into newly allocated shared memory for
+every frame. Reuse the memory: the GPU process has finished with the previous
+update before the next flush.
+---
+ .../platform/graphics/egl/GLContext.cpp       |  7 ++++
+ .../WebCore/platform/graphics/egl/GLContext.h |  1 +
+ .../GPUProcess/graphics/wc/WCSceneContext.cpp | 12 +++++-
+ .../GPUProcess/graphics/wc/WCSceneContext.h   |  1 +
+ .../WebProcess/WebPage/wc/GraphicsLayerWC.cpp | 38 ++++++++++++++-----
+ .../WebProcess/WebPage/wc/GraphicsLayerWC.h   |  1 +
+ 6 files changed, 50 insertions(+), 10 deletions(-)
+
+diff --git a/Source/WebCore/platform/graphics/egl/GLContext.cpp b/Source/WebCore/platform/graphics/egl/GLContext.cpp
+index eabcab898c..e39574ed2b 100644
+--- a/Source/WebCore/platform/graphics/egl/GLContext.cpp
++++ b/Source/WebCore/platform/graphics/egl/GLContext.cpp
+@@ -579,6 +579,13 @@ void GLContext::swapBuffers()
+         eglSwapBuffers(display->eglDisplay(), m_surface);
+ }
+ 
++void GLContext::setSwapInterval(int interval)
++{
++    // Applies to the surface that is current on this thread.
++    if (auto display = m_display.get())
++        eglSwapInterval(display->eglDisplay(), interval);
++}
++
+ GCGLContext GLContext::platformContext() const
+ {
+     return m_context;
+diff --git a/Source/WebCore/platform/graphics/egl/GLContext.h b/Source/WebCore/platform/graphics/egl/GLContext.h
+index 16995f8a09..30366f7b0c 100644
+--- a/Source/WebCore/platform/graphics/egl/GLContext.h
++++ b/Source/WebCore/platform/graphics/egl/GLContext.h
+@@ -94,6 +94,7 @@ public:
+     WEBCORE_EXPORT bool makeContextCurrent();
+     bool unmakeContextCurrent();
+     WEBCORE_EXPORT void swapBuffers();
++    WEBCORE_EXPORT void setSwapInterval(int);
+     GCGLContext platformContext() const;
+ 
+     struct GLExtensions {
+diff --git a/Source/WebKit/GPUProcess/graphics/wc/WCSceneContext.cpp b/Source/WebKit/GPUProcess/graphics/wc/WCSceneContext.cpp
+index c93e34087d..6814799c54 100644
+--- a/Source/WebKit/GPUProcess/graphics/wc/WCSceneContext.cpp
++++ b/Source/WebKit/GPUProcess/graphics/wc/WCSceneContext.cpp
+@@ -48,7 +48,17 @@ bool WCSceneContext::makeContextCurrent()
+ {
+     if (!m_glContext)
+         return false;
+-    return m_glContext->makeContextCurrent();
++    if (!m_glContext->makeContextCurrent())
++        return false;
++    if (!m_didSetSwapInterval) {
++        // Do not block in swapBuffers() until the next display refresh. The web process waits
++        // for each update to be presented before it sends the next one, so blocking here caps
++        // the update rate below the refresh rate and delays video frames. The window is
++        // composed by DWM, which shows whole frames either way.
++        m_didSetSwapInterval = true;
++        m_glContext->setSwapInterval(0);
++    }
++    return true;
+ }
+ 
+ std::unique_ptr<WebCore::TextureMapper> WCSceneContext::createTextureMapper()
+diff --git a/Source/WebKit/GPUProcess/graphics/wc/WCSceneContext.h b/Source/WebKit/GPUProcess/graphics/wc/WCSceneContext.h
+index 4bbcd3dea9..d55b7550d2 100644
+--- a/Source/WebKit/GPUProcess/graphics/wc/WCSceneContext.h
++++ b/Source/WebKit/GPUProcess/graphics/wc/WCSceneContext.h
+@@ -48,6 +48,7 @@ public:
+ 
+ private:
+     const std::unique_ptr<WebCore::GLContext> m_glContext;
++    bool m_didSetSwapInterval { false };
+ };
+ 
+ } // namespace WebKit
+diff --git a/Source/WebKit/WebProcess/WebPage/wc/GraphicsLayerWC.cpp b/Source/WebKit/WebProcess/WebPage/wc/GraphicsLayerWC.cpp
+index afe0a72498..790771b756 100644
+--- a/Source/WebKit/WebProcess/WebPage/wc/GraphicsLayerWC.cpp
++++ b/Source/WebKit/WebProcess/WebPage/wc/GraphicsLayerWC.cpp
+@@ -63,14 +63,20 @@ public:
+                 continue;
+             repainted = true;
+             float deviceScaleFactor = m_owner.deviceScaleFactor();
+-            auto& dirtyRect = tile.dirtyRect();
+-            IntRect scaledDirtyRect = dirtyRect;
++            // Paint whole device pixels. Scaling the integer rect truncates it, which at a
++            // fractional scale factor (150% display scaling) leaves its last row or column
++            // with whatever the tile showed before.
++            FloatRect scaledDirtyRect = tile.dirtyRect();
+             scaledDirtyRect.scale(deviceScaleFactor);
+-            tileUpdate.dirtyRect = scaledDirtyRect;
+-            auto image = m_owner.createImageBuffer(dirtyRect.size(), deviceScaleFactor);
++            IntRect deviceDirtyRect = enclosingIntRect(scaledDirtyRect);
++            tileUpdate.dirtyRect = deviceDirtyRect;
++            auto image = m_owner.createImageBuffer(deviceDirtyRect.size(), 1);
+             auto& context = image->context();
+-            context.translate(-dirtyRect.x(), -dirtyRect.y());
+-            m_owner.paintGraphicsLayerContents(context, dirtyRect);
++            context.translate(-deviceDirtyRect.x(), -deviceDirtyRect.y());
++            context.scale(deviceScaleFactor);
++            FloatRect paintRect = deviceDirtyRect;
++            paintRect.scale(1 / deviceScaleFactor);
++            m_owner.paintGraphicsLayerContents(context, paintRect);
+             image->flushDrawingContextAsync();
+             tileUpdate.backingStore.setImageBuffer(WTF::move(image));
+             update.background.tileUpdates.append(WTF::move(tileUpdate));
+@@ -651,9 +657,23 @@ void GraphicsLayerWC::flushCompositingStateForThisLayerOnly()
+         update.platformLayer.hasLayer = m_platformLayer;
+         if (m_platformLayer && static_cast<WebCore::WCPlatformLayer*>(m_platformLayer)->isImageLayer()) {
+             // One copy of the image into memory the GPU process can read, where the
+-            // compositor uploads it as a texture.
+-            if (RefPtr image = static_cast<WebCore::WCPlatformLayerImage*>(m_platformLayer)->image())
+-                update.platformLayer.image = WebCore::ShareableBitmap::createFromImageDraw(*image, WebCore::ColorSpace::SRGB());
++            // compositor uploads it as a texture. The memory is reused from frame to frame:
++            // the GPU process has finished with the previous update before the next flush
++            // (DrawingAreaWC waits for it), and fresh pages for every video frame cost more
++            // than the copy itself.
++            if (RefPtr image = static_cast<WebCore::WCPlatformLayerImage*>(m_platformLayer)->image()) {
++                auto size = image->size();
++                if (!m_imageLayerBitmap || m_imageLayerBitmap->size() != size)
++                    m_imageLayerBitmap = WebCore::ShareableBitmap::create({ size, WebCore::ColorSpace::SRGB() });
++                if (m_imageLayerBitmap) {
++                    if (auto context = m_imageLayerBitmap->createGraphicsContext()) {
++                        WebCore::FloatRect rect { { }, size };
++                        context->drawNativeImage(*image, rect, rect, { WebCore::CompositeOperator::Copy });
++                        update.platformLayer.image = m_imageLayerBitmap;
++                    }
++                }
++            } else
++                m_imageLayerBitmap = nullptr;
+         }
+ #if ENABLE(WEBGL)
+         else if (m_platformLayer)
+diff --git a/Source/WebKit/WebProcess/WebPage/wc/GraphicsLayerWC.h b/Source/WebKit/WebProcess/WebPage/wc/GraphicsLayerWC.h
+index 92dd694dce..18f0583cf7 100644
+--- a/Source/WebKit/WebProcess/WebPage/wc/GraphicsLayerWC.h
++++ b/Source/WebKit/WebProcess/WebPage/wc/GraphicsLayerWC.h
+@@ -132,6 +132,7 @@ private:
+     Observer* m_observer;
+     const std::unique_ptr<WCTiledBacking> m_tiledBacking;
+     PlatformLayer* m_platformLayer { nullptr };
++    RefPtr<WebCore::ShareableBitmap> m_imageLayerBitmap;
+ 
+     // WebCore::TextureMapperPlatformLayer::Client, for platform layers that supply images.
+     void platformLayerWillBeDestroyed() final;
+-- 
+2.56.1.windows.1
+

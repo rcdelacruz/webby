@@ -11,16 +11,19 @@ mod wk;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
 use std::rc::Rc;
 use webby_core::{Browser, CHROME_HEIGHT, CHROME_HTML, Event, MESSAGE_HANDLER, Runtime, Shell, Shortcut, TabId, ViewState};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Ole::OleInitialize;
-use windows_sys::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_UNAWARE, GetDpiForWindow, SetProcessDpiAwarenessContext};
+use windows_sys::Win32::UI::HiDpi::{
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, DPI_AWARENESS_CONTEXT_UNAWARE, GetDpiForWindow, SetProcessDpiAwarenessContext,
+};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    GetKeyState, SetFocus, VK_CONTROL, VK_F5, VK_LEFT, VK_MENU, VK_NEXT, VK_PRIOR, VK_RIGHT, VK_SHIFT, VK_TAB,
+    GetKeyState, SetFocus, VK_CONTROL, VK_ESCAPE, VK_F5, VK_LEFT, VK_MENU, VK_NEXT, VK_PRIOR, VK_RIGHT, VK_SHIFT, VK_TAB,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
@@ -53,14 +56,20 @@ thread_local! {
     static RUNTIME: RefCell<Option<Rc<Rt>>> = const { RefCell::new(None) };
     /// Window handles the window procedure lays out. Kept apart from the
     /// shell so resizing never has to borrow the runtime.
-    static LAYOUT: Cell<Layout> = const { Cell::new(Layout { chrome: null_mut(), active: null_mut(), chrome_height: 0 }) };
+    static LAYOUT: Cell<Layout> = const { Cell::new(Layout { chrome: null_mut(), active: null_mut(), active_page: null(), chrome_height: 0, fullscreen: false }) };
+    /// Window style and placement to return to when fullscreen ends.
+    static BEFORE_FULLSCREEN: Cell<Option<(isize, WINDOWPLACEMENT)>> = const { Cell::new(None) };
 }
 
 #[derive(Clone, Copy)]
 struct Layout {
     chrome: HWND,
     active: HWND,
+    /// The page shown in `active`, for requests the window makes of it.
+    active_page: wk::Ref,
     chrome_height: i32,
+    /// A page has the whole window: no toolbar, no frame.
+    fullscreen: bool,
 }
 
 fn post(event: Event) {
@@ -119,6 +128,11 @@ impl Drop for View {
             // Detach the callbacks first: they hold a pointer to this View.
             (api.WKPageSetPageStateClient)(self.page, null_mut());
             (api.WKPageSetPageUIClient)(self.page, null());
+            (api.WKPageSetFullScreenClientForTesting)(self.page, null());
+            let layout = LAYOUT.get();
+            if layout.fullscreen && layout.active == self.hwnd {
+                leave_fullscreen(GetParent(self.hwnd));
+            }
             ShowWindow(self.hwnd, SW_HIDE);
             (api.WKPageClose)(self.page);
             (api.WKRelease)(self.view);
@@ -206,6 +220,14 @@ impl Shell for WinShell {
             ui.createNewPage = Some(on_create_new_page);
             (api.WKPageSetPageUIClient)(view.page, &ui.base);
 
+            let mut fullscreen: wk::PageFullScreenClientV0 = std::mem::zeroed();
+            fullscreen.base.client_info = info;
+            fullscreen.willEnterFullScreen = Some(on_will_enter_fullscreen);
+            fullscreen.beganEnterFullScreen = Some(on_began_enter_fullscreen);
+            fullscreen.exitFullScreen = Some(on_exit_fullscreen);
+            fullscreen.beganExitFullScreen = Some(on_began_exit_fullscreen);
+            (api.WKPageSetFullScreenClientForTesting)(view.page, &fullscreen.base);
+
             self.views.insert(id, view);
         }
     }
@@ -215,9 +237,10 @@ impl Shell for WinShell {
     }
 
     fn show_view(&mut self, id: TabId) {
-        let Some(active) = self.views.get(&id).map(|v| v.hwnd) else { return };
+        let Some((active, page)) = self.views.get(&id).map(|v| (v.hwnd, v.page)) else { return };
         let mut layout = LAYOUT.get();
         layout.active = active;
+        layout.active_page = page;
         LAYOUT.set(layout);
         unsafe {
             apply_layout(self.window);
@@ -301,12 +324,75 @@ unsafe fn apply_layout(window: HWND) {
     let mut client = RECT { left: 0, top: 0, right: 0, bottom: 0 };
     GetClientRect(window, &mut client);
     let (width, height) = (client.right, client.bottom);
+    if layout.fullscreen {
+        if !layout.active.is_null() {
+            MoveWindow(layout.active, 0, 0, width, height, 1);
+        }
+        return;
+    }
     if !layout.chrome.is_null() {
         MoveWindow(layout.chrome, 0, 0, width, layout.chrome_height, 1);
     }
     if !layout.active.is_null() {
         MoveWindow(layout.active, 0, layout.chrome_height, width, (height - layout.chrome_height).max(0), 1);
     }
+}
+
+/// Give the page shown in the browser window the whole monitor: no frame and
+/// no toolbar. Called when a page asks for fullscreen, usually a video player.
+unsafe fn enter_fullscreen(window: HWND) {
+    if BEFORE_FULLSCREEN.get().is_some() {
+        return;
+    }
+    let style = GetWindowLongPtrW(window, GWL_STYLE);
+    let mut placement: WINDOWPLACEMENT = std::mem::zeroed();
+    placement.length = std::mem::size_of::<WINDOWPLACEMENT>() as u32;
+    GetWindowPlacement(window, &mut placement);
+    let mut monitor: MONITORINFO = std::mem::zeroed();
+    monitor.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+    if GetMonitorInfoW(MonitorFromWindow(window, MONITOR_DEFAULTTONEAREST), &mut monitor) == 0 {
+        return;
+    }
+    BEFORE_FULLSCREEN.set(Some((style, placement)));
+    let mut layout = LAYOUT.get();
+    layout.fullscreen = true;
+    LAYOUT.set(layout);
+    ShowWindow(layout.chrome, SW_HIDE);
+    SetWindowLongPtrW(window, GWL_STYLE, style & !(WS_OVERLAPPEDWINDOW as isize));
+    let area = monitor.rcMonitor;
+    SetWindowPos(window, HWND_TOP, area.left, area.top, area.right - area.left, area.bottom - area.top, SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+    apply_layout(window);
+}
+
+/// Put the window back as it was before [`enter_fullscreen`].
+unsafe fn leave_fullscreen(window: HWND) {
+    let Some((style, placement)) = BEFORE_FULLSCREEN.take() else { return };
+    let mut layout = LAYOUT.get();
+    layout.fullscreen = false;
+    LAYOUT.set(layout);
+    SetWindowLongPtrW(window, GWL_STYLE, style);
+    SetWindowPlacement(window, &placement);
+    SetWindowPos(window, null_mut(), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+    ShowWindow(layout.chrome, SW_SHOW);
+    apply_layout(window);
+}
+
+unsafe extern "C" fn on_will_enter_fullscreen(_page: wk::Ref, listener: wk::Ref, info: *const c_void) {
+    let view = &*(info as *const View);
+    enter_fullscreen(GetParent(view.hwnd));
+    // WebKit lays the page out for fullscreen once it hears the window is ready.
+    (wk::api().WKCompletionListenerComplete)(listener, null());
+}
+
+unsafe extern "C" fn on_began_enter_fullscreen(_page: wk::Ref, _initial: wk::Rect, _target: wk::Rect, _info: *const c_void) {}
+
+unsafe extern "C" fn on_exit_fullscreen(_page: wk::Ref, info: *const c_void) {
+    let view = &*(info as *const View);
+    leave_fullscreen(GetParent(view.hwnd));
+}
+
+unsafe extern "C" fn on_began_exit_fullscreen(_page: wk::Ref, _initial: wk::Rect, _target: wk::Rect, listener: wk::Ref, _info: *const c_void) {
+    (wk::api().WKCompletionListenerComplete)(listener, null());
 }
 
 unsafe extern "system" fn window_proc(window: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -381,12 +467,63 @@ fn fatal(text: &str) -> ! {
     std::process::exit(1);
 }
 
-pub fn run(browser: Browser, _profile: Option<PathBuf>) {
-    // webby is independent of the Windows display scale: it always lays
-    // out, paints and handles input at 100%, and Windows magnifies the
-    // finished window. Declared before WebKit loads so nothing else can
-    // pick a different mode for the process.
-    unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_UNAWARE) };
+/// The `gstreamer-1.0` folder of plugins that webby's own build of WebKit
+/// ships next to `webby.exe`. Its presence tells that build apart from the
+/// WebKit downloaded by `scripts/fetch-webkit-windows.ps1`.
+fn bundled_gstreamer_plugins() -> Option<PathBuf> {
+    let plugins = std::env::current_exe().ok()?.parent()?.join("gstreamer-1.0");
+    plugins.is_dir().then_some(plugins)
+}
+
+/// An on/off setting from the environment, for testing: `on` and `off` are
+/// the two accepted values, anything else leaves the default.
+fn setting(name: &str, on: &str, off: &str, default: bool) -> bool {
+    match std::env::var(name) {
+        Ok(value) if value == on => true,
+        Ok(value) if value == off => false,
+        _ => default,
+    }
+}
+
+/// Tell GStreamer to use the plugins webby ships. WebKit's web process
+/// inherits these variables and does the media work. Values already set are
+/// kept, so a developer can still point at another build.
+fn configure_gstreamer(plugins: PathBuf, profile: Option<&Path>) {
+    let set = |name: &str, value: PathBuf| {
+        if std::env::var_os(name).is_none() {
+            // No other thread exists yet: this runs first thing in `run`.
+            unsafe { std::env::set_var(name, value) };
+        }
+    };
+    let scanner = plugins.with_file_name("gst-plugin-scanner.exe");
+    set("GST_PLUGIN_SYSTEM_PATH_1_0", plugins);
+    if scanner.is_file() {
+        set("GST_PLUGIN_SCANNER_1_0", scanner);
+    }
+    // The plugin registry is a cache; keep it with the rest of the profile.
+    if let Some(profile) = profile {
+        set("GST_REGISTRY_1_0", profile.join("gstreamer-registry.bin"));
+    }
+}
+
+pub fn run(browser: Browser, profile: Option<PathBuf>) {
+    let bundled_plugins = bundled_gstreamer_plugins();
+    let own_webkit = bundled_plugins.is_some();
+    if let Some(plugins) = bundled_plugins {
+        configure_gstreamer(plugins, profile.as_deref());
+    }
+
+    // webby's own WebKit build draws and takes input correctly at the real
+    // display scale with GPU compositing, which is what makes scrolling and
+    // video smooth. The downloaded build does not: composited pages come out
+    // misplaced and out of step with the mouse. With that build webby stays
+    // unaware of the display scale (Windows magnifies the finished window)
+    // and paints in software. WEBBY_DPI=aware|unaware and WEBBY_GPU=1|0
+    // override either choice. The scale mode is declared before WebKit loads
+    // so nothing else can pick a different one for the process.
+    let dpi_aware = setting("WEBBY_DPI", "aware", "unaware", own_webkit);
+    let gpu = setting("WEBBY_GPU", "1", "0", own_webkit);
+    unsafe { SetProcessDpiAwarenessContext(if dpi_aware { DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 } else { DPI_AWARENESS_CONTEXT_UNAWARE }) };
 
     if let Err(error) = wk::load() {
         fatal(&format!(
@@ -429,12 +566,17 @@ pub fn run(browser: Browser, _profile: Option<PathBuf>) {
         let context = (api.WKContextCreateWithConfiguration)(wk::Owned((api.WKContextConfigurationCreate)()).0);
         let preferences = (api.WKPreferencesCreate)();
         (api.WKPreferencesSetDeveloperExtrasEnabled)(preferences, true);
-        // GPU compositing in the bundled WebKit draws pages misplaced and
-        // out of step with mouse input; the project that publishes that
-        // build always runs it with compositing off on Windows. Setting
-        // WEBBY_GPU=1 turns it back on for testing.
-        let gpu = std::env::var_os("WEBBY_GPU").is_some_and(|v| v == "1");
+        // Pages may ask for fullscreen; the fullscreen client on each view carries it out.
+        (api.WKPreferencesSetFullScreenEnabled)(preferences, true);
+        // Animate wheel and keyboard scrolling instead of jumping a step at a time.
+        // WebKit has no named function for this setting in its C API.
+        (api.WKPreferencesSetBoolValueForKeyForTesting)(preferences, true, wk::string("ScrollAnimatorEnabled").0);
         (api.WKPreferencesSetAcceleratedCompositingEnabled)(preferences, gpu);
+        // Let pages update at the display's own rate. WebKit otherwise holds them near 60 a
+        // second, which on a 120Hz display halves scrolling smoothness and makes 60fps video
+        // drop frames. WEBBY_FULL_RATE=0 goes back to 60.
+        let full_rate = setting("WEBBY_FULL_RATE", "1", "0", true);
+        (api.WKPreferencesSetBoolValueForKeyForTesting)(preferences, !full_rate, wk::string("PreferPageRenderingUpdatesNear60FPSEnabled").0);
         let new_configuration = || {
             let configuration = (api.WKPageConfigurationCreate)();
             (api.WKPageConfigurationSetContext)(configuration, context);
@@ -451,7 +593,13 @@ pub fn run(browser: Browser, _profile: Option<PathBuf>) {
         (api.WKPageConfigurationSetUserContentController)(chrome_configuration.0, messages.0);
         let chrome = View::new(0, chrome_configuration.0, window);
 
-        LAYOUT.set(Layout { chrome: chrome.hwnd, active: null_mut(), chrome_height: chrome_height(GetDpiForWindow(window)) });
+        LAYOUT.set(Layout {
+            chrome: chrome.hwnd,
+            active: null_mut(),
+            active_page: null(),
+            chrome_height: chrome_height(GetDpiForWindow(window)),
+            fullscreen: false,
+        });
         let chrome_page = chrome.page;
         // Content views share one configuration, whose pages all get the
         // media capabilities fix.
@@ -469,6 +617,14 @@ pub fn run(browser: Browser, _profile: Option<PathBuf>) {
 
         let mut message: MSG = std::mem::zeroed();
         while GetMessageW(&mut message, null_mut(), 0, 0) > 0 {
+            // Esc always leaves fullscreen, whatever the page does with the key.
+            if message.message == WM_KEYDOWN && message.wParam as u16 == VK_ESCAPE {
+                let layout = LAYOUT.get();
+                if layout.fullscreen && !layout.active_page.is_null() {
+                    (api.WKPageRequestExitFullScreen)(layout.active_page);
+                    continue;
+                }
+            }
             if let Some(shortcut) = shortcut_for(&message) {
                 post(Event::Shortcut(shortcut));
                 continue;

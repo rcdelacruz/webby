@@ -1,0 +1,27 @@
+From 0ad29763079e435b158e78c7fba223d8aaa70968 Mon Sep 17 00:00:00 2001
+From: webby <webby@localhost>
+Date: Wed, 25 Nov 2026 11:42:42 +0800
+Subject: [PATCH 2/8] vcpkg: do not force cl.exe through CC and CXX in the
+ Windows triplet
+
+Ports built with autotools (libiconv, gettext, libffi, needed by GLib and
+GStreamer) pass the value to libtool, which then hands linker options to
+cl.exe in a form it rejects. vcpkg already selects cl.exe without it.
+---
+ WebKitLibraries/triplets/x64-windows-webkit.cmake | 3 ---
+ 1 file changed, 3 deletions(-)
+
+diff --git a/WebKitLibraries/triplets/x64-windows-webkit.cmake b/WebKitLibraries/triplets/x64-windows-webkit.cmake
+index 2b7d6b778a..47e052b066 100644
+--- a/WebKitLibraries/triplets/x64-windows-webkit.cmake
++++ b/WebKitLibraries/triplets/x64-windows-webkit.cmake
+@@ -46,9 +46,6 @@ if (CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
+     # CMAKE_RC_FLAGS provides include paths for llvm-rc's clang-cl preprocessing step.
+     find_program(HOST_NINJA_EXECUTABLE NAMES ninja ninja-build REQUIRED)
+     set(VCPKG_CMAKE_CONFIGURE_OPTIONS -DCMAKE_MAKE_PROGRAM=${HOST_NINJA_EXECUTABLE} -DCMAKE_AR=/usr/bin/llvm-lib-20 -DCMAKE_LINKER=/usr/bin/lld-link-20 -DCMAKE_MT=/usr/bin/llvm-mt-20 -DCMAKE_RC_COMPILER=/usr/bin/llvm-rc-20 "-DCMAKE_RC_FLAGS=-I ${CRT_INC} -I ${SDK_INC}/ucrt -I ${SDK_INC}/um -I ${SDK_INC}/shared")
+-else ()
+-    set(ENV{CC} cl.exe)
+-    set(ENV{CXX} cl.exe)
+ endif ()
+ 
+ set(CMAKE_EXECUTABLE_SUFFIX_C ".exe")

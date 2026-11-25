@@ -1,0 +1,656 @@
+From 21e2b965057110bb308e0aadc1655662c87698e9 Mon Sep 17 00:00:00 2001
+From: webby <webby@localhost>
+Date: Wed, 25 Nov 2026 21:44:24 +0800
+Subject: [PATCH 15/15] Windows port: show video decoded on the GPU without
+ bringing it into memory
+
+A frame decoded by Direct3D 11 used to be read back into system memory, copied
+into shared memory for the GPU process and uploaded as a texture again: three
+copies of every frame, which a 1440p 60fps stream could not afford, and most of
+a CPU core at 1080p.
+
+The frame now stays a Direct3D texture all the way to WebKit's video sink. On
+the streaming thread the player copies it, on the GPU, into one of a few
+textures created to be shared, waits for that copy, and hands the layer the
+texture's share handle. The compositor in the GPU process opens the handle
+through ANGLE (EGL_ANGLE_d3d_share_handle_client_buffer), binds it to a GL
+texture once and draws it.
+
+Painting a video the other way (into a canvas, or when it has no layer) reads
+the frame back by mapping it. An image made from a sample keeps the sample
+mapped, and a mapped Direct3D frame holds the lock of the decoder's device, so
+that path copies the pixels out and unmaps at once.
+
+WEBKIT_GST_D3D11_DOWNLOAD_FRAMES=1 goes back to reading frames into memory.
+
+gst/d3d11/gstd3d11config.h is a header GStreamer's build generates and the
+vcpkg port does not install; a copy with the values of a desktop build is added
+where the include path finds it.
+---
+ Source/WebCore/PlatformWin.cmake              |   5 +
+ .../gstreamer/MediaPlayerPrivateGStreamer.cpp | 184 +++++++++++++++++-
+ .../gstreamer/MediaPlayerPrivateGStreamer.h   |  11 ++
+ .../gstreamer/VideoFrameGStreamer.cpp         |  29 ++-
+ .../graphics/gstreamer/VideoSinkGStreamer.cpp |   6 +
+ .../gstreamer/gst/d3d11/gstd3d11config.h      |  16 ++
+ .../graphics/wc/WCPlatformLayerImage.h        |  22 +++
+ .../WebKit/GPUProcess/graphics/wc/WCScene.cpp | 105 +++++++++-
+ .../WebProcess/WebPage/wc/GraphicsLayerWC.cpp |   9 +-
+ .../WebProcess/WebPage/wc/WCUpdateInfo.h      |   4 +
+ .../WebPage/wc/WCUpdateInfo.serialization.in  |   3 +
+ 11 files changed, 387 insertions(+), 7 deletions(-)
+ create mode 100644 Source/WebCore/platform/graphics/gstreamer/gst/d3d11/gstd3d11config.h
+
+diff --git a/Source/WebCore/PlatformWin.cmake b/Source/WebCore/PlatformWin.cmake
+index 5e4a3b0c8d..9c886d7bf1 100644
+--- a/Source/WebCore/PlatformWin.cmake
++++ b/Source/WebCore/PlatformWin.cmake
+@@ -153,6 +153,7 @@ list(APPEND WebCore_PRIVATE_FRAMEWORK_HEADERS
+ list(APPEND WebCore_LIBRARIES
+     crypt32
+     dwmapi
++    dxgi
+     iphlpapi
+     ole32
+     usp10
+@@ -202,6 +203,10 @@ if (USE_GSTREAMER)
+     # DirectWrite, for the Skia font cache. It used to come with Media Foundation.
+     list(APPEND WebCore_PRIVATE_LIBRARIES dwrite)
+ 
++    # GStreamer's Direct3D 11 library, to reach the textures hardware decoders produce.
++    find_library(GSTREAMER_D3D11_LIBRARY NAMES gstd3d11-1.0 REQUIRED)
++    list(APPEND WebCore_PRIVATE_LIBRARIES ${GSTREAMER_D3D11_LIBRARY} d3d11 dxgi)
++
+     if (ENABLE_WEB_AUDIO)
+         # Impulse responses for the HRTF panner, read by AudioBusWin.cpp.
+         file(GLOB WebAudioResourceFiles "${WEBCORE_DIR}/platform/audio/resources/*.wav")
+diff --git a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
+index e426192177..f7019e54e9 100644
+--- a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
++++ b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
+@@ -30,6 +30,15 @@
+ #include <windows.h>
+ #include <timeapi.h>
+ #endif
++#if OS(WINDOWS) && USE(GSTREAMER) && USE(GRAPHICS_LAYER_WC)
++#ifndef GST_USE_UNSTABLE_API
++#define GST_USE_UNSTABLE_API
++#endif
++#include <d3d11.h>
++#include <dxgi.h>
++#include <gst/d3d11/gstd3d11.h>
++#include <wrl/client.h>
++#endif
+ #include "TrackPrivateBaseGStreamer.h"
+ #include <optional>
+ 
+@@ -222,6 +231,9 @@ MediaPlayerPrivateGStreamer::~MediaPlayerPrivateGStreamer()
+     tearDown(true);
+ #if OS(WINDOWS)
+     setNeedsFineTimerResolution(false);
++#if USE(GRAPHICS_LAYER_WC)
++    destroySharedVideoTextures();
++#endif
+ #endif
+ }
+ 
+@@ -4074,7 +4086,17 @@ void MediaPlayerPrivateGStreamer::repaint()
+     if (m_videoLayer && m_videoLayer->isAttached()) {
+         // The page is composited and the video has a layer of its own: show the frame
+         // there, which leaves the page around it alone.
+-        m_videoLayer->setImage(nativeImageForCurrentSample());
++#if OS(WINDOWS)
++        WCPlatformLayerImage::SharedTexture sharedTexture;
++        {
++            Locker locker { m_sharedVideoTextureLock };
++            sharedTexture = m_currentSharedVideoTexture;
++        }
++        if (sharedTexture.handle)
++            m_videoLayer->setSharedTexture(sharedTexture);
++        else
++#endif
++            m_videoLayer->setImage(nativeImageForCurrentSample());
+     } else
+ #endif
+     if (RefPtr player = m_player.get())
+@@ -4258,6 +4280,140 @@ bool MediaPlayerPrivateGStreamer::isSeamlessSeekingEnabled() const
+     return player->isLooping() && m_isSegmentSeekAllowed;
+ }
+ 
++#if OS(WINDOWS) && USE(GRAPHICS_LAYER_WC)
++struct MediaPlayerPrivateGStreamer::SharedVideoTextures {
++    WTF_DEPRECATED_MAKE_STRUCT_FAST_ALLOCATED(SharedVideoTextures);
++
++    // The compositor may still be showing the texture written last or the one before it.
++    // Going round four leaves two that are certainly free.
++    static constexpr unsigned count = 4;
++
++    ~SharedVideoTextures()
++    {
++        if (!device)
++            return;
++        // Release the Direct3D objects while holding the lock of the device they belong to,
++        // and before the device itself.
++        gst_d3d11_device_lock(device);
++        copyDone.Reset();
++        for (auto& texture : textures)
++            texture.Reset();
++        gst_d3d11_device_unlock(device);
++        gst_object_unref(device);
++    }
++
++    GstD3D11Device* device { nullptr };
++    std::array<Microsoft::WRL::ComPtr<ID3D11Texture2D>, count> textures;
++    std::array<HANDLE, count> handles { };
++    Microsoft::WRL::ComPtr<ID3D11Query> copyDone;
++    IntSize size;
++    unsigned next { 0 };
++    uint64_t generation { 0 };
++};
++
++// Out of line, and after the definition of SharedVideoTextures: the destructor of the player
++// comes before it in this file, where the type is still incomplete and cannot be deleted.
++void MediaPlayerPrivateGStreamer::destroySharedVideoTextures()
++{
++    Locker locker { m_sharedVideoTextureLock };
++    delete std::exchange(m_sharedVideoTextures, nullptr);
++    m_currentSharedVideoTexture = { };
++}
++
++bool MediaPlayerPrivateGStreamer::copySampleToSharedTexture(GstSample* sample)
++{
++    auto* buffer = gst_sample_get_buffer(sample);
++    auto* caps = gst_sample_get_caps(sample);
++    if (!buffer || !caps)
++        return false;
++
++    auto* memory = gst_buffer_peek_memory(buffer, 0);
++    if (!memory || !gst_is_d3d11_memory(memory))
++        return false;
++
++    GstVideoInfo info;
++    if (!gst_video_info_from_caps(&info, caps) || GST_VIDEO_INFO_FORMAT(&info) != GST_VIDEO_FORMAT_BGRA)
++        return false;
++
++    auto* device = GST_D3D11_MEMORY_CAST(memory)->device;
++    auto* d3dDevice = gst_d3d11_device_get_device_handle(device);
++    auto* context = gst_d3d11_device_get_device_context_handle(device);
++    IntSize size { GST_VIDEO_INFO_WIDTH(&info), GST_VIDEO_INFO_HEIGHT(&info) };
++    if (size.isEmpty())
++        return false;
++
++    Locker locker { m_sharedVideoTextureLock };
++    if (!m_sharedVideoTextures || m_sharedVideoTextures->device != device || m_sharedVideoTextures->size != size) {
++        static std::atomic<uint64_t> lastGeneration { 0 };
++        auto textures = makeUnique<SharedVideoTextures>();
++        D3D11_TEXTURE2D_DESC description { };
++        description.Width = size.width();
++        description.Height = size.height();
++        description.MipLevels = 1;
++        description.ArraySize = 1;
++        description.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
++        description.SampleDesc.Count = 1;
++        description.Usage = D3D11_USAGE_DEFAULT;
++        description.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
++        description.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
++        for (unsigned i = 0; i < SharedVideoTextures::count; ++i) {
++            Microsoft::WRL::ComPtr<IDXGIResource> resource;
++            if (FAILED(d3dDevice->CreateTexture2D(&description, nullptr, &textures->textures[i]))
++                || FAILED(textures->textures[i].As(&resource))
++                || FAILED(resource->GetSharedHandle(&textures->handles[i])) || !textures->handles[i]) {
++                delete std::exchange(m_sharedVideoTextures, nullptr);
++                return false;
++            }
++        }
++        D3D11_QUERY_DESC queryDescription { D3D11_QUERY_EVENT, 0 };
++        d3dDevice->CreateQuery(&queryDescription, &textures->copyDone);
++        textures->device = GST_D3D11_DEVICE(gst_object_ref(device));
++        textures->size = size;
++        textures->generation = ++lastGeneration;
++        delete std::exchange(m_sharedVideoTextures, textures.release());
++    }
++
++    auto& textures = *m_sharedVideoTextures;
++    unsigned index = textures.next;
++    textures.next = (index + 1) % SharedVideoTextures::count;
++
++    // Mapping with GST_MAP_D3D11 brings the texture up to date. The device lock is the one the
++    // decoder and the converter, on their own threads, take around their use of the context.
++    GstMapInfo mapInfo;
++    if (!gst_memory_map(memory, &mapInfo, static_cast<GstMapFlags>(GST_MAP_READ | GST_MAP_D3D11)))
++        return false;
++    auto* source = reinterpret_cast<ID3D11Resource*>(mapInfo.data);
++    D3D11_BOX box { 0, 0, 0, static_cast<UINT>(size.width()), static_cast<UINT>(size.height()), 1 };
++    gst_d3d11_device_lock(device);
++    context->CopySubresourceRegion(textures.textures[index].Get(), 0, 0, 0, 0, source, gst_d3d11_memory_get_subresource_index(GST_D3D11_MEMORY_CAST(memory)), &box);
++    if (textures.copyDone)
++        context->End(textures.copyDone.Get());
++    context->Flush();
++    gst_d3d11_device_unlock(device);
++    gst_memory_unmap(memory, &mapInfo);
++
++    // The compositor is another process with a queue to the GPU of its own, and could draw the
++    // texture before the copy into it has run. Wait for the copy; it takes well under a
++    // millisecond.
++    if (textures.copyDone) {
++        for (unsigned attempt = 0; attempt < 100; ++attempt) {
++            gst_d3d11_device_lock(device);
++            auto result = context->GetData(textures.copyDone.Get(), nullptr, 0, 0);
++            gst_d3d11_device_unlock(device);
++            if (result != S_FALSE)
++                break;
++            if (attempt < 20)
++                ::SwitchToThread();
++            else
++                ::Sleep(1);
++        }
++    }
++
++    m_currentSharedVideoTexture = { static_cast<uint64_t>(reinterpret_cast<uintptr_t>(textures.handles[index])), textures.generation, size };
++    return true;
++}
++#endif
++
+ void MediaPlayerPrivateGStreamer::triggerRepaint(GRefPtr<GstSample>&& sample)
+ {
+     ASSERT(!isMainThread());
+@@ -4274,6 +4430,9 @@ void MediaPlayerPrivateGStreamer::triggerRepaint(GRefPtr<GstSample>&& sample)
+ 
+     bool shouldTriggerResize;
+     IsDuplicateSample isDuplicateSample = IsDuplicateSample::No;
++#if OS(WINDOWS) && USE(GRAPHICS_LAYER_WC)
++    GRefPtr<GstSample> sampleForSharedTexture;
++#endif
+     {
+         Locker sampleLocker { m_sampleMutex };
+         shouldTriggerResize = !m_sample;
+@@ -4286,9 +4445,21 @@ void MediaPlayerPrivateGStreamer::triggerRepaint(GRefPtr<GstSample>&& sample)
+         auto* caps = gst_sample_get_caps(sample.get());
+         if (caps && (!m_videoInfo || !m_sample || caps != gst_sample_get_caps(m_sample.get())))
+             m_videoInfo = VideoFrameGStreamer::infoFromCaps(GRefPtr(caps));
++#if OS(WINDOWS) && USE(GRAPHICS_LAYER_WC)
++        sampleForSharedTexture = sample;
++#endif
+         m_sample = WTF::move(sample);
+     }
+ 
++#if OS(WINDOWS) && USE(GRAPHICS_LAYER_WC)
++    // Here, on the streaming thread, rather than in repaint(): the copy is waited for, and the
++    // main thread should not be the one waiting.
++    if (!copySampleToSharedTexture(sampleForSharedTexture.get())) {
++        Locker locker { m_sharedVideoTextureLock };
++        m_currentSharedVideoTexture = { };
++    }
++#endif
++
+     if (shouldTriggerResize) {
+         GST_DEBUG_OBJECT(pipeline(), "First sample reached the sink, triggering video dimensions update");
+         GRefPtr<GstCaps> caps;
+@@ -4706,7 +4877,14 @@ static GstElement* wrapVideoSinkWithD3D11Conversion(GstElement* sink)
+     GRefPtr upload = gst_element_factory_make("d3d11upload", nullptr);
+     GRefPtr convert = gst_element_factory_make("d3d11convert", nullptr);
+     GRefPtr filter = gst_element_factory_make("capsfilter", nullptr);
+-    GRefPtr download = gst_element_factory_make("d3d11download", nullptr);
++    // Frames stay on the GPU all the way to the sink, and from there go to the compositor in a
++    // shared texture (copySampleToSharedTexture()). WEBKIT_GST_D3D11_DOWNLOAD_FRAMES=1 reads them
++    // back into system memory here instead, as a way round a graphics driver that cannot share.
++    bool downloadFrames = !g_strcmp0(g_getenv("WEBKIT_GST_D3D11_DOWNLOAD_FRAMES"), "1");
++#if !USE(GRAPHICS_LAYER_WC)
++    downloadFrames = true;
++#endif
++    GRefPtr download = gst_element_factory_make(downloadFrames ? "d3d11download" : "identity", nullptr);
+     // Decoding, the conversion with its read back from the GPU, and the sink, which waits for
+     // the main thread to take each frame, would otherwise run one after the other on a single
+     // streaming thread. Together they take longer than the 16.7ms a 60fps frame has. A queue
+@@ -4720,7 +4898,7 @@ static GstElement* wrapVideoSinkWithD3D11Conversion(GstElement* sink)
+ 
+     // sRGB, so that the image made from a frame is in the colour space pages are painted
+     // in and drawing it needs no conversion of each pixel on the CPU.
+-    GRefPtr caps = adoptGRef(gst_caps_from_string("video/x-raw(memory:D3D11Memory), format=(string){ BGRx, BGRA }, colorimetry=(string)sRGB"));
++    GRefPtr caps = adoptGRef(gst_caps_from_string(downloadFrames ? "video/x-raw(memory:D3D11Memory), format=(string){ BGRx, BGRA }, colorimetry=(string)sRGB" : "video/x-raw(memory:D3D11Memory), format=(string)BGRA, colorimetry=(string)sRGB"));
+     g_object_set(filter.get(), "caps", caps.get(), nullptr);
+ 
+     // The bin is returned floating, as a new element is, for the pipeline to own.
+diff --git a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.h b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.h
+index 1efe58ffb0..f04f9120a7 100644
+--- a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.h
++++ b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.h
+@@ -473,6 +473,17 @@ protected:
+     RefPtr<NativeImage> m_lastPaintedImage;
+ #if USE(GRAPHICS_LAYER_WC)
+     std::unique_ptr<WCPlatformLayerImage> m_videoLayer;
++#if OS(WINDOWS)
++    // Frames that arrive as Direct3D 11 textures are copied, on the GPU, into textures the
++    // compositor in the GPU process can open, so that they never pass through system memory.
++    struct SharedVideoTextures;
++    bool copySampleToSharedTexture(GstSample*);
++    void destroySharedVideoTextures();
++    Lock m_sharedVideoTextureLock;
++    SharedVideoTextures* m_sharedVideoTextures WTF_GUARDED_BY_LOCK(m_sharedVideoTextureLock) { nullptr }; // Owned.
++    // Where the current sample is, if it was copied: what repaint() hands to the layer.
++    WCPlatformLayerImage::SharedTexture m_currentSharedVideoTexture WTF_GUARDED_BY_LOCK(m_sharedVideoTextureLock);
++#endif
+ #endif
+ 
+     mutable IntSize m_videoSizeFromCaps;
+diff --git a/Source/WebCore/platform/graphics/gstreamer/VideoFrameGStreamer.cpp b/Source/WebCore/platform/graphics/gstreamer/VideoFrameGStreamer.cpp
+index df2fc2bebd..b1cf38ba4c 100644
+--- a/Source/WebCore/platform/graphics/gstreamer/VideoFrameGStreamer.cpp
++++ b/Source/WebCore/platform/graphics/gstreamer/VideoFrameGStreamer.cpp
+@@ -168,10 +168,35 @@ static RefPtr<ImageGStreamer> convertSampleToImage(const GRefPtr<GstSample>& sam
+     // The fallback video sink already negotiates this format, in system memory. Such a
+     // frame needs no conversion pipeline, which would otherwise run once per painted frame.
+     auto* sampleCaps = gst_sample_get_caps(sample.get());
+-    if (sampleCaps && gst_caps_get_size(sampleCaps) == 1 && gst_caps_features_is_equal(gst_caps_get_features(sampleCaps, 0), GST_CAPS_FEATURES_MEMORY_SYSTEM_MEMORY)
+-        && GST_VIDEO_INFO_FORMAT(&videoInfo) == gst_video_format_from_string(format.characters()))
++    bool hasWantedFormat = sampleCaps && gst_caps_get_size(sampleCaps) == 1 && GST_VIDEO_INFO_FORMAT(&videoInfo) == gst_video_format_from_string(format.characters());
++    if (hasWantedFormat && gst_caps_features_is_equal(gst_caps_get_features(sampleCaps, 0), GST_CAPS_FEATURES_MEMORY_SYSTEM_MEMORY))
+         return ImageGStreamer::create(GRefPtr<GstSample>(sample));
+ 
++#if OS(WINDOWS)
++    // A frame in a Direct3D 11 texture is read back by mapping it. The image made from a sample
++    // keeps the sample mapped for as long as it lives, and a mapped Direct3D frame holds the
++    // lock of the device its decoder is using. So copy the pixels out and let go of the frame.
++    if (hasWantedFormat && gst_caps_features_contains(gst_caps_get_features(sampleCaps, 0), "memory:D3D11Memory")) {
++        GstVideoInfo systemInfo;
++        gst_video_info_set_format(&systemInfo, GST_VIDEO_INFO_FORMAT(&videoInfo), GST_VIDEO_INFO_WIDTH(&videoInfo), GST_VIDEO_INFO_HEIGHT(&videoInfo));
++        GRefPtr buffer = adoptGRef(gst_buffer_new_allocate(nullptr, GST_VIDEO_INFO_SIZE(&systemInfo), nullptr));
++        GstVideoFrame source, destination;
++        if (!buffer || !gst_video_frame_map(&source, &videoInfo, gst_sample_get_buffer(sample.get()), GST_MAP_READ))
++            return nullptr;
++        if (!gst_video_frame_map(&destination, &systemInfo, buffer.get(), GST_MAP_WRITE)) {
++            gst_video_frame_unmap(&source);
++            return nullptr;
++        }
++        bool copied = gst_video_frame_copy(&destination, &source);
++        gst_video_frame_unmap(&destination);
++        gst_video_frame_unmap(&source);
++        if (!copied)
++            return nullptr;
++        GRefPtr systemCaps = adoptGRef(gst_video_info_to_caps(&systemInfo));
++        return ImageGStreamer::create(adoptGRef(gst_sample_new(buffer.get(), systemCaps.get(), gst_sample_get_segment(sample.get()), nullptr)));
++    }
++#endif
++
+     GRefPtr caps = adoptGRef(gst_caps_new_simple("video/x-raw", "format", G_TYPE_STRING, format.characters(), "framerate", GST_TYPE_FRACTION, GST_VIDEO_INFO_FPS_N(&videoInfo), GST_VIDEO_INFO_FPS_D(&videoInfo), "width", G_TYPE_INT, GST_VIDEO_INFO_WIDTH(&videoInfo), "height", G_TYPE_INT, GST_VIDEO_INFO_HEIGHT(&videoInfo), nullptr));
+     auto convertedSample = GStreamerVideoFrameConverter::singleton().convert(sample, caps);
+     if (!convertedSample)
+diff --git a/Source/WebCore/platform/graphics/gstreamer/VideoSinkGStreamer.cpp b/Source/WebCore/platform/graphics/gstreamer/VideoSinkGStreamer.cpp
+index 07238927b0..4428da7e8e 100644
+--- a/Source/WebCore/platform/graphics/gstreamer/VideoSinkGStreamer.cpp
++++ b/Source/WebCore/platform/graphics/gstreamer/VideoSinkGStreamer.cpp
+@@ -48,7 +48,13 @@ using namespace WebCore;
+ #define GST_CAPS_FORMAT "{ xRGB, ARGB }"
+ #endif
+ 
++#if OS(WINDOWS)
++// Frames may also arrive as Direct3D 11 textures: the player hands those to the compositor
++// without bringing them into system memory (see MediaPlayerPrivateGStreamer::triggerRepaint()).
++#define WEBKIT_VIDEO_SINK_PAD_CAPS "video/x-raw(memory:D3D11Memory), format=(string)BGRA; " GST_VIDEO_CAPS_MAKE(GST_CAPS_FORMAT)
++#else
+ #define WEBKIT_VIDEO_SINK_PAD_CAPS GST_VIDEO_CAPS_MAKE_WITH_FEATURES(GST_CAPS_FEATURE_META_GST_VIDEO_GL_TEXTURE_UPLOAD_META, GST_CAPS_FORMAT) ";" GST_VIDEO_CAPS_MAKE(GST_CAPS_FORMAT)
++#endif
+ 
+ static GstStaticPadTemplate s_videoSinkTemplate = GST_STATIC_PAD_TEMPLATE("sink", GST_PAD_SINK, GST_PAD_ALWAYS, GST_STATIC_CAPS(WEBKIT_VIDEO_SINK_PAD_CAPS));
+ 
+diff --git a/Source/WebCore/platform/graphics/gstreamer/gst/d3d11/gstd3d11config.h b/Source/WebCore/platform/graphics/gstreamer/gst/d3d11/gstd3d11config.h
+new file mode 100644
+index 0000000000..b2477bf385
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/gstreamer/gst/d3d11/gstd3d11config.h
+@@ -0,0 +1,16 @@
++/*
++ * GStreamer's Direct3D 11 library includes <gst/d3d11/gstd3d11config.h>, a header its build
++ * generates. The vcpkg port of GStreamer does not install it, so the values of a desktop
++ * (not UWP) build are given here, where the include path for this directory finds them.
++ */
++
++#pragma once
++
++#include <gst/gst.h>
++
++G_BEGIN_DECLS
++
++#define GST_D3D11_WINAPI_ONLY_APP 0
++#define GST_D3D11_WINAPI_APP 1
++
++G_END_DECLS
+diff --git a/Source/WebCore/platform/graphics/wc/WCPlatformLayerImage.h b/Source/WebCore/platform/graphics/wc/WCPlatformLayerImage.h
+index b0b6296505..9b846e3ecf 100644
+--- a/Source/WebCore/platform/graphics/wc/WCPlatformLayerImage.h
++++ b/Source/WebCore/platform/graphics/wc/WCPlatformLayerImage.h
+@@ -25,6 +25,7 @@
+ 
+ #pragma once
+ 
++#include "IntSize.h"
+ #include "NativeImage.h"
+ #include "WCPlatformLayer.h"
+ #include <wtf/RefPtr.h>
+@@ -52,14 +53,35 @@ public:
+     void setImage(RefPtr<NativeImage>&& image)
+     {
+         m_image = WTF::move(image);
++        m_sharedTexture = { };
+         if (auto* layerClient = client())
+             layerClient->setPlatformLayerNeedsDisplay();
+     }
+ 
+     NativeImage* image() const { return m_image.get(); }
+ 
++    // Instead of an image, a Direct3D texture the compositor opens by its share handle and
++    // draws as it is, so that a video frame decoded on the GPU never leaves it. The
++    // generation tells apart textures whose handles happen to have the same value.
++    struct SharedTexture {
++        uint64_t handle { 0 };
++        uint64_t generation { 0 };
++        IntSize size;
++    };
++
++    void setSharedTexture(const SharedTexture& texture)
++    {
++        m_sharedTexture = texture;
++        m_image = nullptr;
++        if (auto* layerClient = client())
++            layerClient->setPlatformLayerNeedsDisplay();
++    }
++
++    const SharedTexture& sharedTexture() const { return m_sharedTexture; }
++
+ private:
+     RefPtr<NativeImage> m_image;
++    SharedTexture m_sharedTexture;
+ };
+ 
+ } // namespace WebCore
+diff --git a/Source/WebKit/GPUProcess/graphics/wc/WCScene.cpp b/Source/WebKit/GPUProcess/graphics/wc/WCScene.cpp
+index 0ab7cab109..51191c9c8b 100644
+--- a/Source/WebKit/GPUProcess/graphics/wc/WCScene.cpp
++++ b/Source/WebKit/GPUProcess/graphics/wc/WCScene.cpp
+@@ -34,6 +34,8 @@
+ #include "WCRemoteFrameHostLayerManager.h"
+ #include "WCSceneContext.h"
+ #include "WCUpdateInfo.h"
++#include <EGL/egl.h>
++#include <EGL/eglext.h>
+ #include <WebCore/BitmapTexturePool.h>
+ #include <WebCore/NativeImage.h>
+ #include <WebCore/ShareableBitmap.h>
+@@ -64,16 +66,112 @@ public:
+         if (!m_texture || m_texture->size() != size)
+             m_texture = WebCore::BitmapTexture::create(size);
+         m_texture->updateContents(image.get(), WebCore::IntRect { { }, size }, { });
++        m_currentSharedTexture = 0;
++    }
++
++    // Shows a Direct3D texture the web process shares by handle, a video frame that was
++    // decoded on the GPU and never left it. ANGLE opens the handle as a pbuffer, which is
++    // bound to a GL texture once; after that a new frame in the same texture costs nothing
++    // here. A player cycles through a few textures, so the bindings are kept.
++    bool setSharedTexture(uint64_t handle, uint64_t generation, const WebCore::IntSize& size)
++    {
++        for (auto& texture : m_sharedTextures) {
++            if (texture.handle == handle && texture.generation == generation) {
++                texture.lastUse = ++m_useCounter;
++                m_currentSharedTexture = texture.texture;
++                m_texture = nullptr;
++                return true;
++            }
++        }
++
++        auto display = eglGetCurrentDisplay();
++        const EGLint configAttributes[] = {
++            EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
++            EGL_RED_SIZE, 8, EGL_GREEN_SIZE, 8, EGL_BLUE_SIZE, 8, EGL_ALPHA_SIZE, 8,
++            EGL_BIND_TO_TEXTURE_RGBA, EGL_TRUE,
++            EGL_NONE
++        };
++        EGLConfig config;
++        EGLint configCount = 0;
++        if (!eglChooseConfig(display, configAttributes, &config, 1, &configCount) || !configCount)
++            return false;
++
++        const EGLint surfaceAttributes[] = {
++            EGL_WIDTH, size.width(), EGL_HEIGHT, size.height(),
++            EGL_TEXTURE_TARGET, EGL_TEXTURE_2D, EGL_TEXTURE_FORMAT, EGL_TEXTURE_RGBA,
++            EGL_NONE
++        };
++        auto surface = eglCreatePbufferFromClientBuffer(display, EGL_D3D_TEXTURE_2D_SHARE_HANDLE_ANGLE, reinterpret_cast<EGLClientBuffer>(static_cast<uintptr_t>(handle)), config, surfaceAttributes);
++        if (surface == EGL_NO_SURFACE)
++            return false;
++
++        GLuint texture = 0;
++        glGenTextures(1, &texture);
++        glBindTexture(GL_TEXTURE_2D, texture);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
++        if (!eglBindTexImage(display, surface, EGL_BACK_BUFFER)) {
++            glDeleteTextures(1, &texture);
++            eglDestroySurface(display, surface);
++            return false;
++        }
++
++        // Keep the bindings of the textures in use and let go of the one unused longest.
++        constexpr size_t maximumSharedTextures = 6;
++        if (m_sharedTextures.size() >= maximumSharedTextures) {
++            size_t oldest = 0;
++            for (size_t i = 1; i < m_sharedTextures.size(); ++i) {
++                if (m_sharedTextures[i].lastUse < m_sharedTextures[oldest].lastUse)
++                    oldest = i;
++            }
++            releaseSharedTexture(m_sharedTextures[oldest]);
++            m_sharedTextures.removeAt(oldest);
++        }
++        m_sharedTextures.append({ handle, generation, surface, texture, ++m_useCounter });
++        m_currentSharedTexture = texture;
++        m_texture = nullptr;
++        return true;
++    }
++
++    ~WCImageLayerContents()
++    {
++        for (auto& texture : m_sharedTextures)
++            releaseSharedTexture(texture);
+     }
+ 
+ private:
++    struct SharedTexture {
++        uint64_t handle;
++        uint64_t generation;
++        EGLSurface surface;
++        GLuint texture;
++        uint64_t lastUse;
++    };
++
++    static void releaseSharedTexture(const SharedTexture& texture)
++    {
++        auto display = eglGetCurrentDisplay();
++        if (display == EGL_NO_DISPLAY)
++            return;
++        eglReleaseTexImage(display, texture.surface, EGL_BACK_BUFFER);
++        eglDestroySurface(display, texture.surface);
++        glDeleteTextures(1, &texture.texture);
++    }
++
+     void paintToTextureMapper(WebCore::TextureMapper& textureMapper, const WebCore::FloatRect& targetRect, const WebCore::TransformationMatrix& modelViewMatrix, float opacity) final
+     {
+-        if (m_texture)
++        if (m_currentSharedTexture)
++            textureMapper.drawTexture(m_currentSharedTexture, { }, targetRect, modelViewMatrix, opacity);
++        else if (m_texture)
+             textureMapper.drawTexture(*m_texture, targetRect, modelViewMatrix, opacity);
+     }
+ 
+     RefPtr<WebCore::BitmapTexture> m_texture;
++    Vector<SharedTexture, 6> m_sharedTextures;
++    GLuint m_currentSharedTexture { 0 };
++    uint64_t m_useCounter { 0 };
+ };
+ 
+ struct WCScene::Layer final : public WCContentBuffer::Client {
+@@ -260,6 +358,11 @@ std::optional<UpdateInfo> WCScene::update(WCUpdateInfo&& update)
+                     layer->imageContents = makeUnique<WCImageLayerContents>();
+                 layer->imageContents->setImage(*image);
+                 layer->texmapLayer.setContentsLayer(layer->imageContents.get());
++            } else if (layerUpdate.platformLayer.sharedTextureHandle) {
++                if (!layer->imageContents)
++                    layer->imageContents = makeUnique<WCImageLayerContents>();
++                layer->imageContents->setSharedTexture(layerUpdate.platformLayer.sharedTextureHandle, layerUpdate.platformLayer.sharedTextureGeneration, layerUpdate.platformLayer.sharedTextureSize);
++                layer->texmapLayer.setContentsLayer(layer->imageContents.get());
+             } else {
+                 WCContentBuffer* contentBuffer = nullptr;
+                 for (auto identifier : layerUpdate.platformLayer.identifiers)
+diff --git a/Source/WebKit/WebProcess/WebPage/wc/GraphicsLayerWC.cpp b/Source/WebKit/WebProcess/WebPage/wc/GraphicsLayerWC.cpp
+index 790771b756..e1dac2561a 100644
+--- a/Source/WebKit/WebProcess/WebPage/wc/GraphicsLayerWC.cpp
++++ b/Source/WebKit/WebProcess/WebPage/wc/GraphicsLayerWC.cpp
+@@ -661,7 +661,14 @@ void GraphicsLayerWC::flushCompositingStateForThisLayerOnly()
+             // the GPU process has finished with the previous update before the next flush
+             // (DrawingAreaWC waits for it), and fresh pages for every video frame cost more
+             // than the copy itself.
+-            if (RefPtr image = static_cast<WebCore::WCPlatformLayerImage*>(m_platformLayer)->image()) {
++            auto& imageLayer = *static_cast<WebCore::WCPlatformLayerImage*>(m_platformLayer);
++            if (auto& texture = imageLayer.sharedTexture(); texture.handle) {
++                // The frame is in a texture the GPU process can open: nothing to copy.
++                update.platformLayer.sharedTextureHandle = texture.handle;
++                update.platformLayer.sharedTextureGeneration = texture.generation;
++                update.platformLayer.sharedTextureSize = texture.size;
++                m_imageLayerBitmap = nullptr;
++            } else if (RefPtr image = imageLayer.image()) {
+                 auto size = image->size();
+                 if (!m_imageLayerBitmap || m_imageLayerBitmap->size() != size)
+                     m_imageLayerBitmap = WebCore::ShareableBitmap::create({ size, WebCore::ColorSpace::SRGB() });
+diff --git a/Source/WebKit/WebProcess/WebPage/wc/WCUpdateInfo.h b/Source/WebKit/WebProcess/WebPage/wc/WCUpdateInfo.h
+index feba49b221..7c54d0f33a 100644
+--- a/Source/WebKit/WebProcess/WebPage/wc/WCUpdateInfo.h
++++ b/Source/WebKit/WebProcess/WebPage/wc/WCUpdateInfo.h
+@@ -119,6 +119,10 @@ struct WCLayerUpdateInfo {
+         Vector<WCContentBufferIdentifier> identifiers;
+         // The new contents of a layer that shows images, such as a video frame.
+         RefPtr<WebCore::ShareableBitmap> image;
++        // Or a Direct3D texture to open by its share handle (see WCPlatformLayerImage).
++        uint64_t sharedTextureHandle { 0 };
++        uint64_t sharedTextureGeneration { 0 };
++        WebCore::IntSize sharedTextureSize;
+     } platformLayer { };
+ 
+     Markable<WebCore::LayerHostingContextIdentifier> hostIdentifier { };
+diff --git a/Source/WebKit/WebProcess/WebPage/wc/WCUpdateInfo.serialization.in b/Source/WebKit/WebProcess/WebPage/wc/WCUpdateInfo.serialization.in
+index 24b14d5b80..0ee96e75ff 100644
+--- a/Source/WebKit/WebProcess/WebPage/wc/WCUpdateInfo.serialization.in
++++ b/Source/WebKit/WebProcess/WebPage/wc/WCUpdateInfo.serialization.in
+@@ -74,6 +74,9 @@ header: "WCUpdateInfo.h"
+     bool hasLayer;
+     Vector<WebKit::WCContentBufferIdentifier> identifiers;
+     RefPtr<WebCore::ShareableBitmap> image;
++    uint64_t sharedTextureHandle;
++    uint64_t sharedTextureGeneration;
++    WebCore::IntSize sharedTextureSize;
+ }
+ 
+ [CustomHeader] struct WebKit::WCLayerUpdateInfo {
+-- 
+2.56.1.windows.1
+

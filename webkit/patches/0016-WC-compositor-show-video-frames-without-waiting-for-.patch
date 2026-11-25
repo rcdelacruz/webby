@@ -1,0 +1,476 @@
+From 48fb91505c22ad330edaa0549f817db4fbedbcca Mon Sep 17 00:00:00 2001
+From: webby <webby@localhost>
+Date: Wed, 25 Nov 2026 22:04:45 +0800
+Subject: [PATCH] WC compositor: show video frames without waiting for the main
+ thread
+
+A decoded frame used to reach the screen through the page: the streaming thread
+handed it to the main thread and waited, the main thread flushed the layer in
+its next rendering update, and that update went to the GPU process. A page that
+keeps its main thread busy (YouTube does) delayed and dropped frames that had
+been decoded in time, and every frame was a few milliseconds late or early
+depending on where the main thread was.
+
+Once the compositor has the video's layer and has been shown a shared texture
+in it, the graphics layer gives the platform layer a presenter: an object that
+sends RemoteWCLayerTreeHost::PresentSharedTexture straight to the GPU process
+and may be used on any thread. The player calls it on the streaming thread,
+right after copying the frame, and no longer waits for the main thread. The
+GPU process shows the texture in the layer and paints the scene again as the
+last update left it.
+---
+ .../gstreamer/MediaPlayerPrivateGStreamer.cpp | 26 +++++++++-
+ .../gstreamer/MediaPlayerPrivateGStreamer.h   |  3 ++
+ .../graphics/wc/WCPlatformLayerImage.h        | 52 +++++++++++++++++--
+ .../graphics/wc/RemoteWCLayerTreeHost.cpp     |  9 ++++
+ .../graphics/wc/RemoteWCLayerTreeHost.h       |  1 +
+ .../wc/RemoteWCLayerTreeHost.messages.in      |  1 +
+ .../WebKit/GPUProcess/graphics/wc/WCScene.cpp | 26 ++++++++++
+ .../WebKit/GPUProcess/graphics/wc/WCScene.h   |  5 ++
+ .../wc/RemoteWCLayerTreeHostProxy.cpp         | 27 ++++++++++
+ .../graphics/wc/RemoteWCLayerTreeHostProxy.h  |  5 ++
+ .../WebProcess/WebPage/wc/DrawingAreaWC.cpp   |  5 ++
+ .../WebProcess/WebPage/wc/DrawingAreaWC.h     |  1 +
+ .../WebProcess/WebPage/wc/GraphicsLayerWC.cpp | 15 +++++-
+ .../WebProcess/WebPage/wc/GraphicsLayerWC.h   |  3 ++
+ 14 files changed, 171 insertions(+), 8 deletions(-)
+
+diff --git a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
+index f7019e54e9..451ea12d8d 100644
+--- a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
++++ b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.cpp
+@@ -228,6 +228,9 @@ MediaPlayerPrivateGStreamer::MediaPlayerPrivateGStreamer(MediaPlayer& player)
+ 
+ MediaPlayerPrivateGStreamer::~MediaPlayerPrivateGStreamer()
+ {
++#if OS(WINDOWS)
++    m_videoLayerForStreamingThread = nullptr;
++#endif
+     tearDown(true);
+ #if OS(WINDOWS)
+     setNeedsFineTimerResolution(false);
+@@ -4454,7 +4457,18 @@ void MediaPlayerPrivateGStreamer::triggerRepaint(GRefPtr<GstSample>&& sample)
+ #if OS(WINDOWS) && USE(GRAPHICS_LAYER_WC)
+     // Here, on the streaming thread, rather than in repaint(): the copy is waited for, and the
+     // main thread should not be the one waiting.
+-    if (!copySampleToSharedTexture(sampleForSharedTexture.get())) {
++    bool presentedDirectly = false;
++    if (copySampleToSharedTexture(sampleForSharedTexture.get())) {
++        // If the compositor already has the video's layer, show the frame from here. It is then
++        // on screen however busy the page keeps the main thread.
++        WCPlatformLayerImage::SharedTexture sharedTexture;
++        {
++            Locker locker { m_sharedVideoTextureLock };
++            sharedTexture = m_currentSharedVideoTexture;
++        }
++        if (auto* videoLayer = m_videoLayerForStreamingThread.load())
++            presentedDirectly = videoLayer->presentSharedTexture(sharedTexture);
++    } else {
+         Locker locker { m_sharedVideoTextureLock };
+         m_currentSharedVideoTexture = { };
+     }
+@@ -4497,6 +4511,13 @@ void MediaPlayerPrivateGStreamer::triggerRepaint(GRefPtr<GstSample>&& sample)
+         });
+     }
+ 
++#if OS(WINDOWS) && USE(GRAPHICS_LAYER_WC)
++    // The frame is already on its way to the screen: do not hold the streaming thread until
++    // the main thread has had time for it.
++    if (presentedDirectly)
++        return;
++#endif
++
+     if (!m_canRenderingBeAccelerated) {
+         Locker locker { m_drawLock };
+         if (m_isBeingDestroyed)
+@@ -4718,6 +4739,9 @@ PlatformLayer* MediaPlayerPrivateGStreamer::platformLayer()
+ {
+     if (!m_videoLayer)
+         m_videoLayer = makeUnique<WCPlatformLayerImage>();
++#if OS(WINDOWS)
++        m_videoLayerForStreamingThread = m_videoLayer.get();
++#endif
+     return m_videoLayer.get();
+ }
+ #endif
+diff --git a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.h b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.h
+index f04f9120a7..2179e17cf4 100644
+--- a/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.h
++++ b/Source/WebCore/platform/graphics/gstreamer/MediaPlayerPrivateGStreamer.h
+@@ -479,6 +479,9 @@ protected:
+     struct SharedVideoTextures;
+     bool copySampleToSharedTexture(GstSample*);
+     void destroySharedVideoTextures();
++    // m_videoLayer, for the streaming thread, which must not read the unique_ptr while the
++    // main thread creates the layer.
++    std::atomic<WCPlatformLayerImage*> m_videoLayerForStreamingThread { nullptr };
+     Lock m_sharedVideoTextureLock;
+     SharedVideoTextures* m_sharedVideoTextures WTF_GUARDED_BY_LOCK(m_sharedVideoTextureLock) { nullptr }; // Owned.
+     // Where the current sample is, if it was copied: what repaint() hands to the layer.
+diff --git a/Source/WebCore/platform/graphics/wc/WCPlatformLayerImage.h b/Source/WebCore/platform/graphics/wc/WCPlatformLayerImage.h
+index 9b846e3ecf..df840ef033 100644
+--- a/Source/WebCore/platform/graphics/wc/WCPlatformLayerImage.h
++++ b/Source/WebCore/platform/graphics/wc/WCPlatformLayerImage.h
+@@ -28,19 +28,30 @@
+ #include "IntSize.h"
+ #include "NativeImage.h"
+ #include "WCPlatformLayer.h"
++#include <wtf/Lock.h>
+ #include <wtf/RefPtr.h>
++#include <wtf/ThreadSafeRefCounted.h>
+ 
+ namespace WebCore {
+ 
++// Shows a shared texture in a layer of the compositor. May be called on any thread, which is
++// the point: a video frame need not wait for the main thread to be free.
++class WCSharedTexturePresenter : public ThreadSafeRefCounted<WCSharedTexturePresenter> {
++public:
++    virtual ~WCSharedTexturePresenter() = default;
++    virtual void present(uint64_t handle, uint64_t generation, const IntSize&) = 0;
++};
++
+ // A layer whose contents are images WebCore hands over one at a time, such as the
+ // frames of a video. The compositor shows the latest image as a texture of its own,
+ // so a new frame costs one upload and no repaint of the page around it.
+-// Used on the main thread only.
++// Used on the main thread only, except for presentSharedTexture().
+ class WCPlatformLayerImage final : public WCPlatformLayer {
+     WTF_MAKE_TZONE_ALLOCATED_INLINE(WCPlatformLayerImage);
+ public:
+     ~WCPlatformLayerImage()
+     {
++        setPresenter(nullptr);
+         if (auto* layerClient = client())
+             layerClient->platformLayerWillBeDestroyed();
+     }
+@@ -53,7 +64,10 @@ public:
+     void setImage(RefPtr<NativeImage>&& image)
+     {
+         m_image = WTF::move(image);
+-        m_sharedTexture = { };
++        {
++            Locker locker { m_lock };
++            m_sharedTexture = { };
++        }
+         if (auto* layerClient = client())
+             layerClient->setPlatformLayerNeedsDisplay();
+     }
+@@ -71,17 +85,45 @@ public:
+ 
+     void setSharedTexture(const SharedTexture& texture)
+     {
+-        m_sharedTexture = texture;
++        {
++            Locker locker { m_lock };
++            m_sharedTexture = texture;
++        }
+         m_image = nullptr;
+         if (auto* layerClient = client())
+             layerClient->setPlatformLayerNeedsDisplay();
+     }
+ 
+-    const SharedTexture& sharedTexture() const { return m_sharedTexture; }
++    SharedTexture sharedTexture() const
++    {
++        Locker locker { m_lock };
++        return m_sharedTexture;
++    }
++
++    // Set by the graphics layer once the compositor has the layer, cleared when it lets go.
++    void setPresenter(RefPtr<WCSharedTexturePresenter>&& presenter)
++    {
++        Locker locker { m_lock };
++        m_presenter = WTF::move(presenter);
++    }
++
++    // Any thread. Shows the texture straight away if the compositor has the layer, and says
++    // whether it did; if not, the caller goes through the main thread and setSharedTexture().
++    bool presentSharedTexture(const SharedTexture& texture)
++    {
++        Locker locker { m_lock };
++        if (!m_presenter)
++            return false;
++        m_sharedTexture = texture;
++        m_presenter->present(texture.handle, texture.generation, texture.size);
++        return true;
++    }
+ 
+ private:
+     RefPtr<NativeImage> m_image;
+-    SharedTexture m_sharedTexture;
++    mutable Lock m_lock;
++    SharedTexture m_sharedTexture WTF_GUARDED_BY_LOCK(m_lock);
++    RefPtr<WCSharedTexturePresenter> m_presenter WTF_GUARDED_BY_LOCK(m_lock);
+ };
+ 
+ } // namespace WebCore
+diff --git a/Source/WebKit/GPUProcess/graphics/wc/RemoteWCLayerTreeHost.cpp b/Source/WebKit/GPUProcess/graphics/wc/RemoteWCLayerTreeHost.cpp
+index 71541ce453..d85ab2a2fe 100644
+--- a/Source/WebKit/GPUProcess/graphics/wc/RemoteWCLayerTreeHost.cpp
++++ b/Source/WebKit/GPUProcess/graphics/wc/RemoteWCLayerTreeHost.cpp
+@@ -107,6 +107,15 @@ void RemoteWCLayerTreeHost::update(WCUpdateInfo&& update, CompletionHandler<void
+     });
+ }
+ 
++// A video frame sent from the web process's streaming thread, not as part of an update of the
++// layer tree. Shown at once: the scene is painted again as the last update left it.
++void RemoteWCLayerTreeHost::presentSharedTexture(WebCore::PlatformLayerIdentifier layer, uint64_t handle, uint64_t generation, WebCore::IntSize size)
++{
++    remoteGraphicsStreamWorkQueue().dispatch([scene = m_scene.get(), layer, handle, generation, size] {
++        scene->presentSharedTexture(layer, handle, generation, size);
++    });
++}
++
+ } // namespace WebKit
+ 
+ #endif // USE(GRAPHICS_LAYER_WC)
+diff --git a/Source/WebKit/GPUProcess/graphics/wc/RemoteWCLayerTreeHost.h b/Source/WebKit/GPUProcess/graphics/wc/RemoteWCLayerTreeHost.h
+index 0e87bfb5e7..2e094807cf 100644
+--- a/Source/WebKit/GPUProcess/graphics/wc/RemoteWCLayerTreeHost.h
++++ b/Source/WebKit/GPUProcess/graphics/wc/RemoteWCLayerTreeHost.h
+@@ -53,6 +53,7 @@ public:
+     ~RemoteWCLayerTreeHost();
+     // message handlers
+     void update(WCUpdateInfo&&, CompletionHandler<void(std::optional<WebKit::UpdateInfo>)>&&);
++    void presentSharedTexture(WebCore::PlatformLayerIdentifier, uint64_t handle, uint64_t generation, WebCore::IntSize);
+ 
+     void ref() const final { RefCounted::ref(); }
+     void deref() const final { RefCounted::deref(); }
+diff --git a/Source/WebKit/GPUProcess/graphics/wc/RemoteWCLayerTreeHost.messages.in b/Source/WebKit/GPUProcess/graphics/wc/RemoteWCLayerTreeHost.messages.in
+index a804151f20..12a91b0bcc 100644
+--- a/Source/WebKit/GPUProcess/graphics/wc/RemoteWCLayerTreeHost.messages.in
++++ b/Source/WebKit/GPUProcess/graphics/wc/RemoteWCLayerTreeHost.messages.in
+@@ -29,6 +29,7 @@
+ ]
+ messages -> RemoteWCLayerTreeHost {
+     Update(struct WebKit::WCUpdateInfo updateInfo) -> (std::optional<WebKit::UpdateInfo> updateInfo)
++    PresentSharedTexture(WebCore::PlatformLayerIdentifier layer, uint64_t handle, uint64_t generation, WebCore::IntSize size)
+ }
+ 
+ #endif // USE(GRAPHICS_LAYER_WC)
+diff --git a/Source/WebKit/GPUProcess/graphics/wc/WCScene.cpp b/Source/WebKit/GPUProcess/graphics/wc/WCScene.cpp
+index 51191c9c8b..b9e3d74147 100644
+--- a/Source/WebKit/GPUProcess/graphics/wc/WCScene.cpp
++++ b/Source/WebKit/GPUProcess/graphics/wc/WCScene.cpp
+@@ -393,6 +393,9 @@ std::optional<UpdateInfo> WCScene::update(WCUpdateInfo&& update)
+ 
+     auto rootLayer = &m_layers.get(*update.rootLayer)->texmapLayer;
+     rootLayer->applyAnimationsRecursively(MonotonicTime::now());
++    m_rootLayer = update.rootLayer;
++    m_viewport = update.viewport;
++    m_paintsToWindow = !update.remoteContextHostedIdentifier && !m_usesOffscreenRendering;
+ 
+     WebCore::BitmapTexture* surface = nullptr;
+     RefPtr<WebCore::BitmapTexture> texture;
+@@ -440,6 +443,29 @@ std::optional<UpdateInfo> WCScene::update(WCUpdateInfo&& update)
+     return result;
+ }
+ 
++void WCScene::presentSharedTexture(WebCore::PlatformLayerIdentifier layerID, uint64_t handle, uint64_t generation, const WebCore::IntSize& size)
++{
++    // Only a layer an update has already set up to show shared textures, and only a scene
++    // that is painted straight to its window; anything else waits for the next update.
++    if (!m_paintsToWindow || !m_rootLayer || !m_context || !m_context->makeContextCurrent())
++        return;
++    auto layerIterator = m_layers.find(layerID);
++    auto rootIterator = m_layers.find(*m_rootLayer);
++    if (layerIterator == m_layers.end() || rootIterator == m_layers.end())
++        return;
++    auto& layer = *layerIterator->value;
++    if (!layer.imageContents || !layer.imageContents->setSharedTexture(handle, generation, size))
++        return;
++
++    auto& rootLayer = rootIterator->value->texmapLayer;
++    rootLayer.applyAnimationsRecursively(MonotonicTime::now());
++    glViewport(0, 0, m_viewport.width(), m_viewport.height());
++    m_textureMapper->beginPainting(WebCore::TextureMapper::FlipY::No, nullptr);
++    rootLayer.paint(*m_textureMapper);
++    m_textureMapper->endPainting();
++    m_context->swapBuffers();
++}
++
+ } // namespace WebKit
+ 
+ #endif // USE(GRAPHICS_LAYER_WC)
+diff --git a/Source/WebKit/GPUProcess/graphics/wc/WCScene.h b/Source/WebKit/GPUProcess/graphics/wc/WCScene.h
+index a54c0da621..268aff1af1 100644
+--- a/Source/WebKit/GPUProcess/graphics/wc/WCScene.h
++++ b/Source/WebKit/GPUProcess/graphics/wc/WCScene.h
+@@ -54,6 +54,7 @@ public:
+     ~WCScene();
+     void initialize(WCSceneContext&);
+     std::optional<UpdateInfo> update(WCUpdateInfo&&);
++    void presentSharedTexture(WebCore::PlatformLayerIdentifier, uint64_t handle, uint64_t generation, const WebCore::IntSize&);
+ 
+ private:
+     struct Layer;
+@@ -65,6 +66,10 @@ private:
+     WebCore::TextureMapperFPSCounter m_fpsCounter;
+     LayerMap m_layers;
+     bool m_usesOffscreenRendering;
++    // What the last update painted, for painting again between updates.
++    Markable<WebCore::PlatformLayerIdentifier> m_rootLayer;
++    WebCore::IntSize m_viewport;
++    bool m_paintsToWindow { false };
+ };
+ 
+ } // namespace WebKit
+diff --git a/Source/WebKit/WebProcess/GPU/graphics/wc/RemoteWCLayerTreeHostProxy.cpp b/Source/WebKit/WebProcess/GPU/graphics/wc/RemoteWCLayerTreeHostProxy.cpp
+index a98d2df0f7..ad74de841f 100644
+--- a/Source/WebKit/WebProcess/GPU/graphics/wc/RemoteWCLayerTreeHostProxy.cpp
++++ b/Source/WebKit/WebProcess/GPU/graphics/wc/RemoteWCLayerTreeHostProxy.cpp
+@@ -87,6 +87,33 @@ uint64_t RemoteWCLayerTreeHostProxy::messageSenderDestinationID() const
+     return wcLayerTreeHostIdentifier().toUInt64();
+ }
+ 
++RefPtr<WebCore::WCSharedTexturePresenter> RemoteWCLayerTreeHostProxy::createSharedTexturePresenter(WebCore::PlatformLayerIdentifier layerID)
++{
++    class Presenter final : public WebCore::WCSharedTexturePresenter {
++        WTF_DEPRECATED_MAKE_FAST_ALLOCATED(Presenter);
++    public:
++        Presenter(Ref<IPC::Connection>&& connection, WCLayerTreeHostIdentifier host, WebCore::PlatformLayerIdentifier layer)
++            : m_connection(WTF::move(connection))
++            , m_host(host)
++            , m_layer(layer)
++        {
++        }
++
++    private:
++        void present(uint64_t handle, uint64_t generation, const WebCore::IntSize& size) final
++        {
++            // IPC::Connection::send() may be called on any thread.
++            m_connection->send(Messages::RemoteWCLayerTreeHost::PresentSharedTexture(m_layer, handle, generation, size), m_host.toUInt64());
++        }
++
++        const Ref<IPC::Connection> m_connection;
++        const WCLayerTreeHostIdentifier m_host;
++        const WebCore::PlatformLayerIdentifier m_layer;
++    };
++
++    return adoptRef(*new Presenter(Ref { ensureGPUProcessConnection().connection() }, wcLayerTreeHostIdentifier(), layerID));
++}
++
+ void RemoteWCLayerTreeHostProxy::update(WCUpdateInfo&& updateInfo, CompletionHandler<void(std::optional<WebKit::UpdateInfo>)>&& completionHandler)
+ {
+     sendWithAsyncReply(Messages::RemoteWCLayerTreeHost::Update(updateInfo), WTF::move(completionHandler));
+diff --git a/Source/WebKit/WebProcess/GPU/graphics/wc/RemoteWCLayerTreeHostProxy.h b/Source/WebKit/WebProcess/GPU/graphics/wc/RemoteWCLayerTreeHostProxy.h
+index 28324fad43..a0d1cd6feb 100644
+--- a/Source/WebKit/WebProcess/GPU/graphics/wc/RemoteWCLayerTreeHostProxy.h
++++ b/Source/WebKit/WebProcess/GPU/graphics/wc/RemoteWCLayerTreeHostProxy.h
+@@ -32,6 +32,8 @@
+ #include "MessageSender.h"
+ #include "UpdateInfo.h"
+ #include "WCLayerTreeHostIdentifier.h"
++#include <WebCore/PlatformLayerIdentifier.h>
++#include <WebCore/WCPlatformLayerImage.h>
+ #include <wtf/TZoneMalloc.h>
+ #include <wtf/WeakRef.h>
+ 
+@@ -50,6 +52,9 @@ public:
+ 
+     void update(WCUpdateInfo&&, CompletionHandler<void(std::optional<WebKit::UpdateInfo>)>&&);
+ 
++    // An object that shows shared textures in one layer of this tree, from any thread.
++    RefPtr<WebCore::WCSharedTexturePresenter> createSharedTexturePresenter(WebCore::PlatformLayerIdentifier);
++
+     WTF_ABSTRACT_THREAD_SAFE_REF_COUNTED_AND_CAN_MAKE_WEAK_PTR_IMPL;
+ 
+ private:
+diff --git a/Source/WebKit/WebProcess/WebPage/wc/DrawingAreaWC.cpp b/Source/WebKit/WebProcess/WebPage/wc/DrawingAreaWC.cpp
+index 95bdaa66c0..829485f9d5 100644
+--- a/Source/WebKit/WebProcess/WebPage/wc/DrawingAreaWC.cpp
++++ b/Source/WebKit/WebProcess/WebPage/wc/DrawingAreaWC.cpp
+@@ -419,6 +419,11 @@ RefPtr<ImageBuffer> DrawingAreaWC::createImageBuffer(FloatSize size, float devic
+     return ImageBuffer::create<ImageBufferShareableBitmapBackend>(size, deviceScaleFactor, ColorSpace::SRGB(), { PixelFormat::BGRA8 }, RenderingPurpose::DOM, { });
+ }
+ 
++RefPtr<WebCore::WCSharedTexturePresenter> DrawingAreaWC::createSharedTexturePresenter(WebCore::PlatformLayerIdentifier layerID)
++{
++    return m_remoteWCLayerTreeHostProxy->createSharedTexturePresenter(layerID);
++}
++
+ void DrawingAreaWC::displayDidRefresh(MonotonicTime)
+ {
+     m_waitDidUpdate = false;
+diff --git a/Source/WebKit/WebProcess/WebPage/wc/DrawingAreaWC.h b/Source/WebKit/WebProcess/WebPage/wc/DrawingAreaWC.h
+index c8a852c440..79bb1e60d8 100644
+--- a/Source/WebKit/WebProcess/WebPage/wc/DrawingAreaWC.h
++++ b/Source/WebKit/WebProcess/WebPage/wc/DrawingAreaWC.h
+@@ -75,6 +75,7 @@ private:
+     void graphicsLayerRemoved(GraphicsLayerWC&) override;
+     void commitLayerUpdateInfo(WCLayerUpdateInfo&&) override;
+     RefPtr<WebCore::ImageBuffer> createImageBuffer(WebCore::FloatSize, float deviceScaleFactor) override;
++    RefPtr<WebCore::WCSharedTexturePresenter> createSharedTexturePresenter(WebCore::PlatformLayerIdentifier) override;
+ 
+     bool isCompositingMode();
+     void updateRendering();
+diff --git a/Source/WebKit/WebProcess/WebPage/wc/GraphicsLayerWC.cpp b/Source/WebKit/WebProcess/WebPage/wc/GraphicsLayerWC.cpp
+index e1dac2561a..9a511d1755 100644
+--- a/Source/WebKit/WebProcess/WebPage/wc/GraphicsLayerWC.cpp
++++ b/Source/WebKit/WebProcess/WebPage/wc/GraphicsLayerWC.cpp
+@@ -446,8 +446,13 @@ void GraphicsLayerWC::setContentsToPlatformLayer(PlatformLayer* platformLayer, C
+ // A platform layer that supplies images, such as a video's, says so when it has a new one.
+ void GraphicsLayerWC::setImagePlatformLayerClient(WebCore::TextureMapperPlatformLayer::Client* client)
+ {
+-    if (m_platformLayer && static_cast<WebCore::WCPlatformLayer*>(m_platformLayer)->isImageLayer())
++    if (m_platformLayer && static_cast<WebCore::WCPlatformLayer*>(m_platformLayer)->isImageLayer()) {
+         m_platformLayer->setClient(client);
++        // A layer that is being attached gets its presenter after the flush that tells the
++        // compositor about it; one that is being detached must stop using its presenter now.
++        static_cast<WebCore::WCPlatformLayerImage*>(m_platformLayer)->setPresenter(nullptr);
++    }
++    m_imageLayerHasPresenter = false;
+ }
+ 
+ void GraphicsLayerWC::platformLayerWillBeDestroyed()
+@@ -662,12 +667,18 @@ void GraphicsLayerWC::flushCompositingStateForThisLayerOnly()
+             // (DrawingAreaWC waits for it), and fresh pages for every video frame cost more
+             // than the copy itself.
+             auto& imageLayer = *static_cast<WebCore::WCPlatformLayerImage*>(m_platformLayer);
+-            if (auto& texture = imageLayer.sharedTexture(); texture.handle) {
++            if (auto texture = imageLayer.sharedTexture(); texture.handle) {
+                 // The frame is in a texture the GPU process can open: nothing to copy.
+                 update.platformLayer.sharedTextureHandle = texture.handle;
+                 update.platformLayer.sharedTextureGeneration = texture.generation;
+                 update.platformLayer.sharedTextureSize = texture.size;
+                 m_imageLayerBitmap = nullptr;
++                // From here on the compositor has this layer and shows shared textures in it, so
++                // later frames can go to it directly, without a flush on the main thread.
++                if (!m_imageLayerHasPresenter && m_observer) {
++                    imageLayer.setPresenter(m_observer->createSharedTexturePresenter(m_layerID));
++                    m_imageLayerHasPresenter = true;
++                }
+             } else if (RefPtr image = imageLayer.image()) {
+                 auto size = image->size();
+                 if (!m_imageLayerBitmap || m_imageLayerBitmap->size() != size)
+diff --git a/Source/WebKit/WebProcess/WebPage/wc/GraphicsLayerWC.h b/Source/WebKit/WebProcess/WebPage/wc/GraphicsLayerWC.h
+index 18f0583cf7..37cdbe1391 100644
+--- a/Source/WebKit/WebProcess/WebPage/wc/GraphicsLayerWC.h
++++ b/Source/WebKit/WebProcess/WebPage/wc/GraphicsLayerWC.h
+@@ -30,6 +30,7 @@
+ #include "WCUpdateInfo.h"
+ #include <WebCore/GraphicsLayerContentsDisplayDelegate.h>
+ #include <WebCore/TextureMapperPlatformLayer.h>
++#include <WebCore/WCPlatformLayerImage.h>
+ #include <wtf/DoublyLinkedList.h>
+ 
+ namespace WebCore {
+@@ -46,6 +47,7 @@ public:
+         virtual void graphicsLayerRemoved(GraphicsLayerWC&) = 0;
+         virtual void commitLayerUpdateInfo(WCLayerUpdateInfo&&) = 0;
+         virtual RefPtr<WebCore::ImageBuffer> createImageBuffer(WebCore::FloatSize, float deviceScaleFactor) = 0;
++        virtual RefPtr<WebCore::WCSharedTexturePresenter> createSharedTexturePresenter(WebCore::PlatformLayerIdentifier) { return nullptr; }
+     };
+ 
+     GraphicsLayerWC(Type layerType, WebCore::GraphicsLayerClient&, Observer&);
+@@ -133,6 +135,7 @@ private:
+     const std::unique_ptr<WCTiledBacking> m_tiledBacking;
+     PlatformLayer* m_platformLayer { nullptr };
+     RefPtr<WebCore::ShareableBitmap> m_imageLayerBitmap;
++    bool m_imageLayerHasPresenter { false };
+ 
+     // WebCore::TextureMapperPlatformLayer::Client, for platform layers that supply images.
+     void platformLayerWillBeDestroyed() final;
+-- 
+2.56.1.windows.1
+

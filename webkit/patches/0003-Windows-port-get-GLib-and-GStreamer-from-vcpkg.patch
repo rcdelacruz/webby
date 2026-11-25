@@ -1,0 +1,80 @@
+From 4d063b71e6ec3d410ea1133d84f05ac639d1f457 Mon Sep 17 00:00:00 2001
+From: webby <webby@localhost>
+Date: Wed, 25 Nov 2026 17:35:26 +0800
+Subject: [PATCH 3/8] Windows port: get GLib and GStreamer from vcpkg
+
+Adds a gstreamer feature to the vcpkg manifest (GLib, GStreamer with the
+base, good, bad and libav plugin sets, and a pkgconf to find them with) and
+has build-webkit request it.
+
+Host tools are built with the WebKit triplet as well. Under the stock
+x64-windows triplet the zlib port, which maps to zlib-ng here, provides no
+zlib, and the host GLib that GStreamer's build needs cannot be built.
+---
+ Tools/Scripts/webkitdirs.pm |  7 ++++++-
+ vcpkg.json                  | 27 +++++++++++++++++++++++++++
+ 2 files changed, 33 insertions(+), 1 deletion(-)
+
+diff --git a/Tools/Scripts/webkitdirs.pm b/Tools/Scripts/webkitdirs.pm
+index d65a4e9abd..17c7e706cf 100755
+--- a/Tools/Scripts/webkitdirs.pm
++++ b/Tools/Scripts/webkitdirs.pm
+@@ -3175,7 +3175,11 @@ sub generateBuildSystemFromCMakeProject
+         if (architecture() eq "arm64") {
+             push @args, '-DVCPKG_TARGET_TRIPLET=arm64-windows-webkit';
+         } else {
+-            push @args, '-DVCPKG_TARGET_TRIPLET=x64-windows-webkit'
++            push @args, '-DVCPKG_TARGET_TRIPLET=x64-windows-webkit';
++            # Build tools come from the same triplet as the libraries. The stock
++            # x64-windows triplet has no zlib here: the zlib port maps to zlib-ng,
++            # which is only zlib compatible under WebKit's triplet.
++            push @args, '-DVCPKG_HOST_TRIPLET=x64-windows-webkit' unless isWinCrossCompileFromLinux();
+         }
+         if (isWinCrossCompileFromLinux()) {
+             push @args, '-DVCPKG_APPLOCAL_DEPS=OFF';
+@@ -3532,6 +3536,7 @@ sub vcpkgArgsFromFeatures(\@;$)
+     }
+ 
+     push @args, "web";
++    push @args, "gstreamer";
+     push @args, "avif" if $avif;
+     push @args, "jpeg-xl" if $jpegxl;
+     push @args, "lcms" if $lcms;
+diff --git a/vcpkg.json b/vcpkg.json
+index 9a2fcb8424..4b90eb23f9 100644
+--- a/vcpkg.json
++++ b/vcpkg.json
+@@ -15,6 +15,33 @@
+         }
+       ]
+     },
++    "gstreamer": {
++      "description": "Build the GStreamer media backend",
++      "dependencies": [
++        "glib",
++        {
++          "name": "gstreamer",
++          "default-features": false,
++          "features": [
++            "dash",
++            "hls",
++            "libav",
++            "mpg123",
++            "ogg",
++            "opus-base",
++            "plugins-bad",
++            "plugins-base",
++            "plugins-good",
++            "vorbis",
++            "vpx"
++          ]
++        },
++        {
++          "name": "pkgconf",
++          "host": true
++        }
++      ]
++    },
+     "cairo": {
+       "description": "Build with cairo graphics backend",
+       "dependencies": [

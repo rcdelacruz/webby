@@ -1,0 +1,25 @@
+From fe8c8772a8eff4b35bf18b2d9eb880cd9f1e774d Mon Sep 17 00:00:00 2001
+From: webby <webby@localhost>
+Date: Wed, 25 Nov 2026 17:35:50 +0800
+Subject: [PATCH 8/8] Windows port: animate wheel and keyboard scrolling
+
+Turns ENABLE_SMOOTH_SCROLLING on. With it off a notch of the mouse wheel moves
+the page 100 pixels in one step. The application still chooses, through the
+ScrollAnimatorEnabled preference.
+---
+ Source/cmake/OptionsWin.cmake | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/Source/cmake/OptionsWin.cmake b/Source/cmake/OptionsWin.cmake
+index cefb115ec4..9cd9a54114 100644
+--- a/Source/cmake/OptionsWin.cmake
++++ b/Source/cmake/OptionsWin.cmake
+@@ -93,7 +93,7 @@ WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEBASSEMBLY_OMGJIT PRIVATE ON)
+ WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEBKIT_OVERFLOW_SCROLLING_CSS_PROPERTY PUBLIC OFF)
+ WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_XSLT PUBLIC ON)
+ 
+-WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_SMOOTH_SCROLLING PRIVATE OFF)
++WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_SMOOTH_SCROLLING PRIVATE ON)
+ WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_WEBGL PRIVATE OFF)
+ WEBKIT_OPTION_DEFAULT_PORT_VALUE(USE_AVIF PRIVATE OFF)
+ WEBKIT_OPTION_DEFAULT_PORT_VALUE(USE_SKIA PRIVATE ON)

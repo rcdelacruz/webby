@@ -1,0 +1,51 @@
+From 302c85ffc1c28c122948828a4f8e83dc95564fe5 Mon Sep 17 00:00:00 2001
+From: webby <webby@localhost>
+Date: Wed, 25 Nov 2026 17:35:29 +0800
+Subject: [PATCH 5/8] Windows port: let the application carry out fullscreen
+ requests
+
+PageClientImpl refused every fullscreen request and ignored the client given
+to WKPageSetFullScreenClientForTesting(). The application owns the top-level
+window on this port, so keep that client and use it when one is set.
+---
+ Source/WebKit/UIProcess/win/PageClientImpl.cpp | 6 +++++-
+ Source/WebKit/UIProcess/win/PageClientImpl.h   | 5 +++++
+ 2 files changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/Source/WebKit/UIProcess/win/PageClientImpl.cpp b/Source/WebKit/UIProcess/win/PageClientImpl.cpp
+index 0ec4f66b00..04bfe9cd3a 100644
+--- a/Source/WebKit/UIProcess/win/PageClientImpl.cpp
++++ b/Source/WebKit/UIProcess/win/PageClientImpl.cpp
+@@ -299,11 +299,15 @@ void PageClientImpl::didCommitLoadForMainFrame(const String& /* mimeType */, boo
+ #if ENABLE(FULLSCREEN_API)
+ WebFullScreenManagerProxyClient& PageClientImpl::fullScreenManagerProxyClient()
+ {
++    if (m_fullscreenClientForTesting)
++        return *m_fullscreenClientForTesting;
++
+     return *this;
+ }
+ 
+-void PageClientImpl::setFullScreenClientForTesting(std::unique_ptr<WebFullScreenManagerProxyClient>&&)
++void PageClientImpl::setFullScreenClientForTesting(std::unique_ptr<WebFullScreenManagerProxyClient>&& client)
+ {
++    m_fullscreenClientForTesting = WTF::move(client);
+ }
+ 
+ void PageClientImpl::closeFullScreenManager()
+diff --git a/Source/WebKit/UIProcess/win/PageClientImpl.h b/Source/WebKit/UIProcess/win/PageClientImpl.h
+index 85b82ed6e3..2a69b63a46 100644
+--- a/Source/WebKit/UIProcess/win/PageClientImpl.h
++++ b/Source/WebKit/UIProcess/win/PageClientImpl.h
+@@ -166,6 +166,11 @@ private:
+     DefaultUndoController m_undoController;
+ 
+     WebView& m_view;
++#if ENABLE(FULLSCREEN_API)
++    // The application embedding the view owns the top-level window, so it carries
++    // out fullscreen requests: see WKPageSetFullScreenClientForTesting().
++    std::unique_ptr<WebFullScreenManagerProxyClient> m_fullscreenClientForTesting;
++#endif
+ };
+ 
+ } // namespace WebKit

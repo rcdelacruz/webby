@@ -1,0 +1,325 @@
+From eed1303a40c0a8f705a68c79a699ad2770c0edd7 Mon Sep 17 00:00:00 2001
+From: webby <webby@localhost>
+Date: Wed, 25 Nov 2026 17:35:30 +0800
+Subject: [PATCH 6/8] WC compositor: layers that show images handed over by
+ WebCore
+
+Adds WCPlatformLayerImage, a platform layer whose contents are images
+supplied one at a time, such as the frames of a video. GraphicsLayerWC sends
+the current image with the layer update as a shareable bitmap, and WCScene
+shows it as a texture of its own that the compositor scales.
+
+Without this a video is painted into the tiles of the page around it. Tiles
+are rasterized on the CPU, so the cost grows with the painted area: a 1080p
+video reached 15 frames a second on screen in a window and 11 in fullscreen.
+---
+ Source/WebCore/platform/TextureMapper.cmake   |  1 +
+ .../platform/graphics/wc/WCPlatformLayer.h    |  3 +
+ .../graphics/wc/WCPlatformLayerImage.h        | 65 +++++++++++++++++++
+ .../WebKit/GPUProcess/graphics/wc/WCScene.cpp | 37 +++++++++++
+ .../WebProcess/WebPage/wc/GraphicsLayerWC.cpp | 31 ++++++++-
+ .../WebProcess/WebPage/wc/GraphicsLayerWC.h   |  8 ++-
+ .../WebProcess/WebPage/wc/WCUpdateInfo.h      |  3 +
+ .../WebPage/wc/WCUpdateInfo.serialization.in  |  1 +
+ 8 files changed, 147 insertions(+), 2 deletions(-)
+ create mode 100644 Source/WebCore/platform/graphics/wc/WCPlatformLayerImage.h
+
+diff --git a/Source/WebCore/platform/TextureMapper.cmake b/Source/WebCore/platform/TextureMapper.cmake
+index 5b77b34a8e..28f1e98317 100644
+--- a/Source/WebCore/platform/TextureMapper.cmake
++++ b/Source/WebCore/platform/TextureMapper.cmake
+@@ -61,5 +61,6 @@ if (USE_GRAPHICS_LAYER_WC)
+         platform/graphics/texmap/TextureMapperSparseBackingStore.h
+ 
+         platform/graphics/wc/WCPlatformLayer.h
++        platform/graphics/wc/WCPlatformLayerImage.h
+     )
+ endif ()
+diff --git a/Source/WebCore/platform/graphics/wc/WCPlatformLayer.h b/Source/WebCore/platform/graphics/wc/WCPlatformLayer.h
+index d88bb8de45..289b168282 100644
+--- a/Source/WebCore/platform/graphics/wc/WCPlatformLayer.h
++++ b/Source/WebCore/platform/graphics/wc/WCPlatformLayer.h
+@@ -32,6 +32,9 @@ namespace WebCore {
+ 
+ class WCPlatformLayer : public TextureMapperPlatformLayer {
+     WTF_MAKE_TZONE_ALLOCATED_INLINE(WCPlatformLayer);
++public:
++    // Whether this is a WCPlatformLayerImage, whose contents are images WebCore hands over.
++    virtual bool isImageLayer() const { return false; }
+ 
+ private:
+     // TextureMapperPlatformLayer
+diff --git a/Source/WebCore/platform/graphics/wc/WCPlatformLayerImage.h b/Source/WebCore/platform/graphics/wc/WCPlatformLayerImage.h
+new file mode 100644
+index 0000000000..b0b6296505
+--- /dev/null
++++ b/Source/WebCore/platform/graphics/wc/WCPlatformLayerImage.h
+@@ -0,0 +1,65 @@
++/*
++ * Copyright (C) 2026 webby contributors.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#pragma once
++
++#include "NativeImage.h"
++#include "WCPlatformLayer.h"
++#include <wtf/RefPtr.h>
++
++namespace WebCore {
++
++// A layer whose contents are images WebCore hands over one at a time, such as the
++// frames of a video. The compositor shows the latest image as a texture of its own,
++// so a new frame costs one upload and no repaint of the page around it.
++// Used on the main thread only.
++class WCPlatformLayerImage final : public WCPlatformLayer {
++    WTF_MAKE_TZONE_ALLOCATED_INLINE(WCPlatformLayerImage);
++public:
++    ~WCPlatformLayerImage()
++    {
++        if (auto* layerClient = client())
++            layerClient->platformLayerWillBeDestroyed();
++    }
++
++    bool isImageLayer() const final { return true; }
++
++    // True once a graphics layer shows this layer's contents.
++    bool isAttached() { return !!client(); }
++
++    void setImage(RefPtr<NativeImage>&& image)
++    {
++        m_image = WTF::move(image);
++        if (auto* layerClient = client())
++            layerClient->setPlatformLayerNeedsDisplay();
++    }
++
++    NativeImage* image() const { return m_image.get(); }
++
++private:
++    RefPtr<NativeImage> m_image;
++};
++
++} // namespace WebCore
+diff --git a/Source/WebKit/GPUProcess/graphics/wc/WCScene.cpp b/Source/WebKit/GPUProcess/graphics/wc/WCScene.cpp
+index cbca2078f0..0ab7cab109 100644
+--- a/Source/WebKit/GPUProcess/graphics/wc/WCScene.cpp
++++ b/Source/WebKit/GPUProcess/graphics/wc/WCScene.cpp
+@@ -48,12 +48,42 @@ namespace WebKit {
+ 
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(WCScene);
+ 
++// The contents of a layer that shows images supplied by the web process, such as the
++// frames of a video: one texture, replaced when a new image arrives and scaled by the
++// compositor.
++class WCImageLayerContents final : public WebCore::TextureMapperPlatformLayer {
++    WTF_MAKE_TZONE_ALLOCATED_INLINE(WCImageLayerContents);
++public:
++    void setImage(WebCore::ShareableBitmap& bitmap)
++    {
++        RefPtr image = WebCore::NativeImage::create(bitmap.createPlatformImage(WebCore::BackingStoreCopy::DontCopyBackingStore));
++        if (!image)
++            return;
++
++        auto size = image->size();
++        if (!m_texture || m_texture->size() != size)
++            m_texture = WebCore::BitmapTexture::create(size);
++        m_texture->updateContents(image.get(), WebCore::IntRect { { }, size }, { });
++    }
++
++private:
++    void paintToTextureMapper(WebCore::TextureMapper& textureMapper, const WebCore::FloatRect& targetRect, const WebCore::TransformationMatrix& modelViewMatrix, float opacity) final
++    {
++        if (m_texture)
++            textureMapper.drawTexture(*m_texture, targetRect, modelViewMatrix, opacity);
++    }
++
++    RefPtr<WebCore::BitmapTexture> m_texture;
++};
++
+ struct WCScene::Layer final : public WCContentBuffer::Client {
+     WTF_MAKE_TZONE_ALLOCATED_INLINE(WCScene::Layer);
+ public:
+     Layer() = default;
+     ~Layer()
+     {
++        if (imageContents)
++            texmapLayer.setContentsLayer(nullptr);
+         if (contentBuffer)
+             contentBuffer->setClient(nullptr);
+         if (hostIdentifier)
+@@ -71,6 +101,7 @@ public:
+     std::unique_ptr<WebCore::TextureMapperSparseBackingStore> backingStore;
+     std::unique_ptr<WebCore::TextureMapperLayer> backdropLayer;
+     WCContentBuffer* contentBuffer { nullptr };
++    std::unique_ptr<WCImageLayerContents> imageContents;
+     Markable<WebCore::LayerHostingContextIdentifier> hostIdentifier;
+ };
+ 
+@@ -223,6 +254,12 @@ std::optional<UpdateInfo> WCScene::update(WCUpdateInfo&& update)
+                     layer->contentBuffer = nullptr;
+                 }
+                 layer->texmapLayer.setContentsLayer(nullptr);
++                layer->imageContents = nullptr;
++            } else if (RefPtr image = layerUpdate.platformLayer.image) {
++                if (!layer->imageContents)
++                    layer->imageContents = makeUnique<WCImageLayerContents>();
++                layer->imageContents->setImage(*image);
++                layer->texmapLayer.setContentsLayer(layer->imageContents.get());
+             } else {
+                 WCContentBuffer* contentBuffer = nullptr;
+                 for (auto identifier : layerUpdate.platformLayer.identifiers)
+diff --git a/Source/WebKit/WebProcess/WebPage/wc/GraphicsLayerWC.cpp b/Source/WebKit/WebProcess/WebPage/wc/GraphicsLayerWC.cpp
+index 9d57b16185..afe0a72498 100644
+--- a/Source/WebKit/WebProcess/WebPage/wc/GraphicsLayerWC.cpp
++++ b/Source/WebKit/WebProcess/WebPage/wc/GraphicsLayerWC.cpp
+@@ -30,6 +30,8 @@
+ #if USE(GRAPHICS_LAYER_WC)
+ 
+ #include "WCPlatformLayerGCGL.h"
++#include <WebCore/ShareableBitmap.h>
++#include <WebCore/WCPlatformLayerImage.h>
+ #include "WCTileGrid.h"
+ #include <WebCore/GraphicsContext.h>
+ #include <WebCore/TransformState.h>
+@@ -165,6 +167,7 @@ GraphicsLayerWC::GraphicsLayerWC(Type layerType, GraphicsLayerClient& client, Ob
+ 
+ GraphicsLayerWC::~GraphicsLayerWC()
+ {
++    setImagePlatformLayerClient(nullptr);
+     willBeDestroyed();
+     if (m_observer)
+         m_observer->graphicsLayerRemoved(*this);
+@@ -427,11 +430,31 @@ void GraphicsLayerWC::setContentsToPlatformLayer(PlatformLayer* platformLayer, C
+     m_hasContentsDisplayDelegate = false;
+     if (m_platformLayer == platformLayer)
+         return;
++    setImagePlatformLayerClient(nullptr);
+     m_platformLayer = platformLayer;
++    setImagePlatformLayerClient(this);
+     noteLayerPropertyChanged(WCLayerChange::PlatformLayer);
+     updateDebugIndicators();
+ }
+ 
++// A platform layer that supplies images, such as a video's, says so when it has a new one.
++void GraphicsLayerWC::setImagePlatformLayerClient(WebCore::TextureMapperPlatformLayer::Client* client)
++{
++    if (m_platformLayer && static_cast<WebCore::WCPlatformLayer*>(m_platformLayer)->isImageLayer())
++        m_platformLayer->setClient(client);
++}
++
++void GraphicsLayerWC::platformLayerWillBeDestroyed()
++{
++    m_platformLayer = nullptr;
++    noteLayerPropertyChanged(WCLayerChange::PlatformLayer);
++}
++
++void GraphicsLayerWC::setPlatformLayerNeedsDisplay()
++{
++    setContentsNeedsDisplay();
++}
++
+ void GraphicsLayerWC::setContentsToPlatformLayerHost(WebCore::LayerHostingContextIdentifier identifier)
+ {
+     if (m_hostIdentifier && *m_hostIdentifier == identifier)
+@@ -626,8 +649,14 @@ void GraphicsLayerWC::flushCompositingStateForThisLayerOnly()
+         update.backdropFiltersRect = backdropFiltersRect();
+     if (update.changes & WCLayerChange::PlatformLayer) {
+         update.platformLayer.hasLayer = m_platformLayer;
++        if (m_platformLayer && static_cast<WebCore::WCPlatformLayer*>(m_platformLayer)->isImageLayer()) {
++            // One copy of the image into memory the GPU process can read, where the
++            // compositor uploads it as a texture.
++            if (RefPtr image = static_cast<WebCore::WCPlatformLayerImage*>(m_platformLayer)->image())
++                update.platformLayer.image = WebCore::ShareableBitmap::createFromImageDraw(*image, WebCore::ColorSpace::SRGB());
++        }
+ #if ENABLE(WEBGL)
+-        if (m_platformLayer)
++        else if (m_platformLayer)
+             update.platformLayer.identifiers = static_cast<WCPlatformLayerGCGL*>(m_platformLayer)->takeContentBufferIdentifiers();
+ #endif
+     }
+diff --git a/Source/WebKit/WebProcess/WebPage/wc/GraphicsLayerWC.h b/Source/WebKit/WebProcess/WebPage/wc/GraphicsLayerWC.h
+index bf335bec02..92dd694dce 100644
+--- a/Source/WebKit/WebProcess/WebPage/wc/GraphicsLayerWC.h
++++ b/Source/WebKit/WebProcess/WebPage/wc/GraphicsLayerWC.h
+@@ -29,6 +29,7 @@
+ 
+ #include "WCUpdateInfo.h"
+ #include <WebCore/GraphicsLayerContentsDisplayDelegate.h>
++#include <WebCore/TextureMapperPlatformLayer.h>
+ #include <wtf/DoublyLinkedList.h>
+ 
+ namespace WebCore {
+@@ -38,7 +39,7 @@ class TransformState;
+ namespace WebKit {
+ class WCTiledBacking;
+ 
+-class GraphicsLayerWC final : public WebCore::GraphicsLayer, public DoublyLinkedListNode<GraphicsLayerWC> {
++class GraphicsLayerWC final : public WebCore::GraphicsLayer, private WebCore::TextureMapperPlatformLayer::Client, public DoublyLinkedListNode<GraphicsLayerWC> {
+ public:
+     struct Observer {
+         virtual void graphicsLayerAdded(GraphicsLayerWC&) = 0;
+@@ -131,6 +132,11 @@ private:
+     Observer* m_observer;
+     const std::unique_ptr<WCTiledBacking> m_tiledBacking;
+     PlatformLayer* m_platformLayer { nullptr };
++
++    // WebCore::TextureMapperPlatformLayer::Client, for platform layers that supply images.
++    void platformLayerWillBeDestroyed() final;
++    void setPlatformLayerNeedsDisplay() final;
++    void setImagePlatformLayerClient(WebCore::TextureMapperPlatformLayer::Client*);
+     bool m_hasContentsDisplayDelegate { false };
+     Markable<WebCore::LayerHostingContextIdentifier> m_hostIdentifier;
+     WebCore::Color m_solidColor;
+diff --git a/Source/WebKit/WebProcess/WebPage/wc/WCUpdateInfo.h b/Source/WebKit/WebProcess/WebPage/wc/WCUpdateInfo.h
+index cf0ba75b7b..feba49b221 100644
+--- a/Source/WebKit/WebProcess/WebPage/wc/WCUpdateInfo.h
++++ b/Source/WebKit/WebProcess/WebPage/wc/WCUpdateInfo.h
+@@ -30,6 +30,7 @@
+ #include "WCBackingStore.h"
+ #include "WCContentBufferIdentifier.h"
+ #include <WebCore/GraphicsLayer.h>
++#include <WebCore/ShareableBitmap.h>
+ #include <WebCore/TextureMapperSparseBackingStore.h>
+ #include <optional>
+ #include <wtf/OptionSet.h>
+@@ -116,6 +117,8 @@ struct WCLayerUpdateInfo {
+     struct PlatformLayerChanges {
+         bool hasLayer;
+         Vector<WCContentBufferIdentifier> identifiers;
++        // The new contents of a layer that shows images, such as a video frame.
++        RefPtr<WebCore::ShareableBitmap> image;
+     } platformLayer { };
+ 
+     Markable<WebCore::LayerHostingContextIdentifier> hostIdentifier { };
+diff --git a/Source/WebKit/WebProcess/WebPage/wc/WCUpdateInfo.serialization.in b/Source/WebKit/WebProcess/WebPage/wc/WCUpdateInfo.serialization.in
+index 9337647fa7..24b14d5b80 100644
+--- a/Source/WebKit/WebProcess/WebPage/wc/WCUpdateInfo.serialization.in
++++ b/Source/WebKit/WebProcess/WebPage/wc/WCUpdateInfo.serialization.in
+@@ -73,6 +73,7 @@ header: "WCUpdateInfo.h"
+ [Nested] struct WebKit::WCLayerUpdateInfo::PlatformLayerChanges {
+     bool hasLayer;
+     Vector<WebKit::WCContentBufferIdentifier> identifiers;
++    RefPtr<WebCore::ShareableBitmap> image;
+ }
+ 
+ [CustomHeader] struct WebKit::WCLayerUpdateInfo {

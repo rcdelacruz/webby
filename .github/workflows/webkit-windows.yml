@@ -11,7 +11,7 @@ on:
 
 env:
   # WebKit revision to build: a branch name or a full commit hash.
-  WEBKIT_REF: main
+  WEBKIT_REF: 5fb92adf43dcc854668e7e4879ff0064bd567c3d
   SOURCE: C:\wk
   CC: clang-cl
   CXX: clang-cl

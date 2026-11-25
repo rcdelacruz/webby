@@ -20,6 +20,21 @@ pub type ScriptMessageCallback = unsafe extern "C" fn(message: Ref, reply: Ref, 
 pub type EvaluateCallback = unsafe extern "C" fn(result: Ref, error: Ref, context: *mut c_void);
 pub type CreateNewPageCallback =
     unsafe extern "C" fn(page: Ref, configuration: Ref, action: Ref, features: Ref, client_info: *const c_void) -> Ref;
+pub type WillEnterFullScreenCallback = unsafe extern "C" fn(page: Ref, listener: Ref, client_info: *const c_void);
+pub type BeganEnterFullScreenCallback = unsafe extern "C" fn(page: Ref, initial: Rect, target: Rect, client_info: *const c_void);
+pub type ExitFullScreenCallback = unsafe extern "C" fn(page: Ref, client_info: *const c_void);
+pub type BeganExitFullScreenCallback =
+    unsafe extern "C" fn(page: Ref, initial: Rect, target: Rect, listener: Ref, client_info: *const c_void);
+
+/// `WKRect`: an origin and a size, in doubles.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Rect {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
 
 #[repr(C)]
 pub struct ClientBase {
@@ -65,6 +80,17 @@ pub struct PageUIClientV6 {
     pub later: [*const c_void; 4],
 }
 
+/// `WKPageFullScreenClientV0`. WebKit asks the application to take its window
+/// in and out of fullscreen, since the application owns that window.
+#[repr(C)]
+pub struct PageFullScreenClientV0 {
+    pub base: ClientBase,
+    pub willEnterFullScreen: Option<WillEnterFullScreenCallback>,
+    pub beganEnterFullScreen: Option<BeganEnterFullScreenCallback>,
+    pub exitFullScreen: Option<ExitFullScreenCallback>,
+    pub beganExitFullScreen: Option<BeganExitFullScreenCallback>,
+}
+
 macro_rules! webkit_api {
     ($(fn $name:ident($($arg:ty),*) $(-> $ret:ty)?;)*) => {
         pub struct Api {
@@ -103,6 +129,8 @@ webkit_api! {
     fn WKPreferencesCreate() -> Ref;
     fn WKPreferencesSetDeveloperExtrasEnabled(Ref, bool);
     fn WKPreferencesSetAcceleratedCompositingEnabled(Ref, bool);
+    fn WKPreferencesSetFullScreenEnabled(Ref, bool);
+    fn WKPreferencesSetBoolValueForKeyForTesting(Ref, bool, Ref);
 
     fn WKPageConfigurationCreate() -> Ref;
     fn WKPageConfigurationSetContext(Ref, Ref);
@@ -137,6 +165,8 @@ webkit_api! {
     fn WKPageSetCustomUserAgent(Ref, Ref);
     fn WKPageSetPageStateClient(Ref, *mut ClientBase);
     fn WKPageSetPageUIClient(Ref, *const ClientBase);
+    fn WKPageSetFullScreenClientForTesting(Ref, *const ClientBase);
+    fn WKPageRequestExitFullScreen(Ref);
     fn WKPageEvaluateJavaScriptInMainFrame(Ref, Ref, *mut c_void, Option<EvaluateCallback>);
 }
 

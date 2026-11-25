@@ -1,0 +1,50 @@
+From 2ca3efd011213a5c3247de29ad1992d704d295fc Mon Sep 17 00:00:00 2001
+From: webby <webby@localhost>
+Date: Wed, 25 Nov 2026 17:35:27 +0800
+Subject: [PATCH 4/8] Draw video frames through recording graphics contexts on
+ every port
+
+RemoteGraphicsContextProxy::drawVideoFrame() did nothing outside Cocoa, and
+DisplayList::RecorderImpl::drawVideoFrame() was unimplemented. A media player
+that paints its frames therefore showed no picture when the page is drawn
+through the GPU process. Both now fall back to
+GraphicsContext::drawVideoFrame(), which converts the frame to an image and
+draws that.
+---
+ .../graphics/displaylists/DisplayListRecorderImpl.cpp       | 6 +++---
+ .../WebProcess/GPU/graphics/RemoteGraphicsContextProxy.cpp  | 4 ++++
+ 2 files changed, 7 insertions(+), 3 deletions(-)
+
+diff --git a/Source/WebCore/platform/graphics/displaylists/DisplayListRecorderImpl.cpp b/Source/WebCore/platform/graphics/displaylists/DisplayListRecorderImpl.cpp
+index 0910aff057..65457c2769 100644
+--- a/Source/WebCore/platform/graphics/displaylists/DisplayListRecorderImpl.cpp
++++ b/Source/WebCore/platform/graphics/displaylists/DisplayListRecorderImpl.cpp
+@@ -409,10 +409,10 @@ void RecorderImpl::fillEllipse(const FloatRect& rect)
+ }
+ 
+ #if ENABLE(VIDEO)
+-void RecorderImpl::drawVideoFrame(const VideoFrame&, const FloatRect&, ShouldDiscardAlpha, RasterDrawingOptions)
++void RecorderImpl::drawVideoFrame(const VideoFrame& frame, const FloatRect& destination, ShouldDiscardAlpha shouldDiscardAlpha, RasterDrawingOptions options)
+ {
+-    appendStateChangeItemIfNecessary();
+-    // FIXME: TODO
++    // Recorded as the image the frame converts to.
++    GraphicsContext::drawVideoFrame(frame, destination, shouldDiscardAlpha, options);
+ }
+ #endif // ENABLE(VIDEO)
+ 
+diff --git a/Source/WebKit/WebProcess/GPU/graphics/RemoteGraphicsContextProxy.cpp b/Source/WebKit/WebProcess/GPU/graphics/RemoteGraphicsContextProxy.cpp
+index 5b7ad257c2..6676b864bb 100644
+--- a/Source/WebKit/WebProcess/GPU/graphics/RemoteGraphicsContextProxy.cpp
++++ b/Source/WebKit/WebProcess/GPU/graphics/RemoteGraphicsContextProxy.cpp
+@@ -659,6 +659,10 @@ void RemoteGraphicsContextProxy::drawVideoFrame(const VideoFrame& frame, const F
+     if (!sharedVideoFrame)
+         return;
+     send(Messages::RemoteGraphicsContext::DrawVideoFrame(WTF::move(*sharedVideoFrame), destination, shouldDiscardAlpha, options));
++#else
++    // No shared video frame transport on this port: convert the frame to an
++    // image here and draw that, as GraphicsContext does.
++    GraphicsContext::drawVideoFrame(frame, destination, shouldDiscardAlpha, options);
+ #endif
+ }
+ #endif
