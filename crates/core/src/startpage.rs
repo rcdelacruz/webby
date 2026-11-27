@@ -25,7 +25,7 @@ pub fn html(top_sites: &[(String, String)]) -> String {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
 :root {{ color-scheme: light dark; --bg:#f6f6f4; --fg:#1d1d1f; --muted:#6e6e73; --card:#fff; --line:#d9d9d6; --accent:#0a6cff; }}
-@media (prefers-color-scheme: dark) {{ :root {{ --bg:#1c1c1e; --fg:#f2f2f2; --muted:#98989d; --card:#2a2a2d; --line:#3a3a3d; --accent:#4c9bff; }} }}
+@media (prefers-color-scheme: dark) {{ :root {{ --bg:#09090b; --fg:#f4f4f5; --muted:#8a8c97; --card:#141418; --line:#26262d; --accent:#4c9bff; }} }}
 * {{ box-sizing: border-box; }}
 body {{ margin:0; background:var(--bg); color:var(--fg); font:15px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif; }}
 main {{ max-width:720px; margin:0 auto; padding:12vh 24px 48px; }}

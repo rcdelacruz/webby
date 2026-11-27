@@ -161,11 +161,11 @@ webkit_api! {
     fn WKPageCopyTitle(Ref) -> Ref;
     fn WKPageCopyActiveURL(Ref) -> Ref;
     fn WKPageGetEstimatedProgress(Ref) -> f64;
-    fn WKPageClose(Ref);
     fn WKPageSetCustomUserAgent(Ref, Ref);
     fn WKPageSetPageStateClient(Ref, *mut ClientBase);
     fn WKPageSetPageUIClient(Ref, *const ClientBase);
     fn WKPageSetFullScreenClientForTesting(Ref, *const ClientBase);
+    fn WKPageSetUseDarkAppearanceForTesting(Ref, bool);
     fn WKPageRequestExitFullScreen(Ref);
     fn WKPageEvaluateJavaScriptInMainFrame(Ref, Ref, *mut c_void, Option<EvaluateCallback>);
 }

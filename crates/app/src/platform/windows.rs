@@ -16,9 +16,11 @@ use std::ptr::{null, null_mut};
 use std::rc::Rc;
 use webby_core::{Browser, CHROME_HEIGHT, CHROME_HTML, Event, MESSAGE_HANDLER, Runtime, Shell, Shortcut, TabId, ViewState};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows_sys::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
 use windows_sys::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows_sys::Win32::System::Ole::OleInitialize;
+use windows_sys::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 use windows_sys::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, DPI_AWARENESS_CONTEXT_UNAWARE, GetDpiForWindow, SetProcessDpiAwarenessContext,
 };
@@ -56,7 +58,9 @@ thread_local! {
     static RUNTIME: RefCell<Option<Rc<Rt>>> = const { RefCell::new(None) };
     /// Window handles the window procedure lays out. Kept apart from the
     /// shell so resizing never has to borrow the runtime.
-    static LAYOUT: Cell<Layout> = const { Cell::new(Layout { chrome: null_mut(), active: null_mut(), active_page: null(), chrome_height: 0, fullscreen: false }) };
+    static LAYOUT: Cell<Layout> = const { Cell::new(Layout { chrome: null_mut(), chrome_page: null(), active: null_mut(), active_page: null(), chrome_height: 0, fullscreen: false }) };
+    /// Whether webby and the pages it shows use the dark appearance.
+    static DARK: Cell<bool> = const { Cell::new(false) };
     /// Window style and placement to return to when fullscreen ends.
     static BEFORE_FULLSCREEN: Cell<Option<(isize, WINDOWPLACEMENT)>> = const { Cell::new(None) };
 }
@@ -64,6 +68,8 @@ thread_local! {
 #[derive(Clone, Copy)]
 struct Layout {
     chrome: HWND,
+    /// The toolbar's page, so a change of appearance can reach it.
+    chrome_page: wk::Ref,
     active: HWND,
     /// The page shown in `active`, for requests the window makes of it.
     active_page: wk::Ref,
@@ -144,8 +150,59 @@ impl Drop for View {
     }
 }
 
+/// Whether Windows is set to show apps in dark mode. WEBBY_THEME=dark|light
+/// overrides it.
+fn prefers_dark() -> bool {
+    let mut light: u32 = 1;
+    let mut size = std::mem::size_of::<u32>() as u32;
+    let found = unsafe {
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            wide(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize").as_ptr(),
+            wide("AppsUseLightTheme").as_ptr(),
+            RRF_RT_REG_DWORD,
+            null_mut(),
+            &mut light as *mut u32 as *mut c_void,
+            &mut size,
+        ) == 0
+    };
+    setting("WEBBY_THEME", "dark", "light", found && light == 0)
+}
+
+/// Tell a page which appearance to use, which is what `prefers-color-scheme`
+/// answers. WebKit's Windows port never reports the system's dark mode
+/// itself, and it only passes this on to a web process that is already
+/// running, so this is repeated whenever a page starts or finishes loading.
+unsafe fn apply_appearance(page: wk::Ref) {
+    if !page.is_null() {
+        (wk::api().WKPageSetUseDarkAppearanceForTesting)(page, DARK.get());
+    }
+}
+
+/// Follow the system's appearance: the title bar, the toolbar and the page
+/// in view at once, other tabs when they next load.
+unsafe fn update_appearance(window: HWND) {
+    DARK.set(prefers_dark());
+    let dark = DARK.get() as i32;
+    DwmSetWindowAttribute(
+        window,
+        DWMWA_USE_IMMERSIVE_DARK_MODE as u32,
+        &dark as *const i32 as *const c_void,
+        std::mem::size_of::<i32>() as u32,
+    );
+    let layout = LAYOUT.get();
+    apply_appearance(layout.chrome_page);
+    apply_appearance(layout.active_page);
+}
+
+/// The toolbar's page reports loading only so it can be given its appearance.
+unsafe extern "C" fn on_chrome_loading_changed(info: *const c_void) {
+    apply_appearance(info as wk::Ref);
+}
+
 unsafe extern "C" fn on_loading_changed(info: *const c_void) {
     let view = &*(info as *const View);
+    apply_appearance(view.page);
     view.loading.set(!view.loading.get());
     post(Event::View(view.id, view.snapshot()));
 }
@@ -247,6 +304,7 @@ impl Shell for WinShell {
         layout.active_page = page;
         LAYOUT.set(layout);
         unsafe {
+            apply_appearance(page);
             apply_layout(self.window);
             for view in self.views.values() {
                 ShowWindow(view.hwnd, if view.hwnd == active { SW_SHOW } else { SW_HIDE });
@@ -364,7 +422,15 @@ unsafe fn enter_fullscreen(window: HWND) {
     ShowWindow(layout.chrome, SW_HIDE);
     SetWindowLongPtrW(window, GWL_STYLE, style & !(WS_OVERLAPPEDWINDOW as isize));
     let area = monitor.rcMonitor;
-    SetWindowPos(window, HWND_TOP, area.left, area.top, area.right - area.left, area.bottom - area.top, SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+    SetWindowPos(
+        window,
+        HWND_TOP,
+        area.left,
+        area.top,
+        area.right - area.left,
+        area.bottom - area.top,
+        SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+    );
     apply_layout(window);
 }
 
@@ -395,7 +461,13 @@ unsafe extern "C" fn on_exit_fullscreen(_page: wk::Ref, info: *const c_void) {
     leave_fullscreen(GetParent(view.hwnd));
 }
 
-unsafe extern "C" fn on_began_exit_fullscreen(_page: wk::Ref, _initial: wk::Rect, _target: wk::Rect, listener: wk::Ref, _info: *const c_void) {
+unsafe extern "C" fn on_began_exit_fullscreen(
+    _page: wk::Ref,
+    _initial: wk::Rect,
+    _target: wk::Rect,
+    listener: wk::Ref,
+    _info: *const c_void,
+) {
     (wk::api().WKCompletionListenerComplete)(listener, null());
 }
 
@@ -423,6 +495,13 @@ unsafe extern "system" fn window_proc(window: HWND, message: u32, wparam: WPARAM
                 SetFocus(active);
             }
             0
+        }
+        // Sent for many settings, the system's light or dark mode among them.
+        WM_SETTINGCHANGE => {
+            if prefers_dark() != DARK.get() {
+                update_appearance(window);
+            }
+            DefWindowProcW(window, message, wparam, lparam)
         }
         // The child views cover the whole client area.
         WM_ERASEBKGND => 1,
@@ -527,7 +606,9 @@ pub fn run(browser: Browser, profile: Option<PathBuf>) {
     // so nothing else can pick a different one for the process.
     let dpi_aware = setting("WEBBY_DPI", "aware", "unaware", own_webkit);
     let gpu = setting("WEBBY_GPU", "1", "0", own_webkit);
-    unsafe { SetProcessDpiAwarenessContext(if dpi_aware { DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 } else { DPI_AWARENESS_CONTEXT_UNAWARE }) };
+    unsafe {
+        SetProcessDpiAwarenessContext(if dpi_aware { DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 } else { DPI_AWARENESS_CONTEXT_UNAWARE })
+    };
 
     if let Err(error) = wk::load() {
         fatal(&format!(
@@ -580,7 +661,11 @@ pub fn run(browser: Browser, profile: Option<PathBuf>) {
         // second, which on a 120Hz display halves scrolling smoothness and makes 60fps video
         // drop frames. WEBBY_FULL_RATE=0 goes back to 60.
         let full_rate = setting("WEBBY_FULL_RATE", "1", "0", true);
-        (api.WKPreferencesSetBoolValueForKeyForTesting)(preferences, !full_rate, wk::string("PreferPageRenderingUpdatesNear60FPSEnabled").0);
+        (api.WKPreferencesSetBoolValueForKeyForTesting)(
+            preferences,
+            !full_rate,
+            wk::string("PreferPageRenderingUpdatesNear60FPSEnabled").0,
+        );
         let new_configuration = || {
             let configuration = (api.WKPageConfigurationCreate)();
             (api.WKPageConfigurationSetContext)(configuration, context);
@@ -597,8 +682,14 @@ pub fn run(browser: Browser, profile: Option<PathBuf>) {
         (api.WKPageConfigurationSetUserContentController)(chrome_configuration.0, messages.0);
         let chrome = View::new(0, chrome_configuration.0, window);
 
+        let mut chrome_state: wk::PageStateClientV0 = std::mem::zeroed();
+        chrome_state.base.client_info = chrome.page;
+        chrome_state.didChangeIsLoading = Some(on_chrome_loading_changed);
+        (api.WKPageSetPageStateClient)(chrome.page, &mut chrome_state.base);
+
         LAYOUT.set(Layout {
             chrome: chrome.hwnd,
+            chrome_page: chrome.page,
             active: null_mut(),
             active_page: null(),
             chrome_height: chrome_height(GetDpiForWindow(window)),
@@ -615,6 +706,7 @@ pub fn run(browser: Browser, profile: Option<PathBuf>) {
         let shell = WinShell { window, configuration, chrome, views: HashMap::new() };
         RUNTIME.with(|r| *r.borrow_mut() = Some(Rc::new(Runtime::new(browser, shell))));
 
+        update_appearance(window);
         ShowWindow(window, SW_SHOWDEFAULT);
         apply_layout(window);
         (api.WKPageLoadHTMLString)(chrome_page, wk::string(CHROME_HTML).0, wk::url("about:blank").0);
