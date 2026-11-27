@@ -31,12 +31,11 @@ first time:
 
 | Platform | Engine | State |
 | --- | --- | --- |
-| Linux | WebKitGTK 6.0 (GTK 4) | Runs; tested end to end |
+| Windows | webby's own build of WebKit's Windows port (`WebKit2.dll`); no WebView2, no Chromium | Tested by hand on Windows 11 |
 | macOS | System WebKit (`WKWebView`), the engine Safari uses | Builds and packages in CI; not yet tested by hand |
-| Windows | WebKit's own Windows port (`WebKit2.dll`); no WebView2, no Chromium | Builds and packages in CI; not yet tested by hand |
+| Linux | WebKitGTK 6.0 (GTK 4) | Runs; tested end to end |
 
-The macOS and Windows backends were written on Linux. If something
-misbehaves there, please open an issue.
+If something misbehaves, please open an issue.
 
 ## Features
 
@@ -48,6 +47,11 @@ misbehaves there, please open an issue.
 - Start page listing the sites you visit most.
 - History and session restore: tabs reopen where you left off.
 - Light and dark appearance, following the system.
+- On Windows: streaming audio and video (YouTube, HLS, Web Audio), video
+  kept on the GPU, smooth scrolling and page fullscreen, through webby's
+  own build of WebKit. See [webkit/](webkit/).
+- `webby:media` in the address bar shows what the build reports to web
+  pages about audio and video.
 
 ### Keyboard shortcuts
 
@@ -102,9 +106,12 @@ On Windows, webby loads `WebKit2.dll` when it starts, so the build itself
 needs no WebKit SDK. Apple publishes no Windows binaries of WebKit; the
 script downloads the build of WebKit's Windows port that the Playwright
 project publishes for browser testing and unpacks it next to `webby.exe`.
-To use a WebKit you built yourself from
-[webkit.org](https://webkit.org/webkit-on-windows/) sources, zip its `bin`
-directory and point `WEBBY_WEBKIT_URL` at it.
+That build has no streaming media and always looks light. The released
+installer ships webby's own build instead: WebKit from
+[webkit.org](https://webkit.org/webkit-on-windows/) sources with the
+patches in [webkit/](webkit/). To run against a WebKit you built
+yourself, use `scripts/package-windows.ps1 -StageOnly`, or zip its files
+and point `WEBBY_WEBKIT_URL` at the zip.
 
 ### Building the installers
 
@@ -112,10 +119,12 @@ directory and point `WEBBY_WEBKIT_URL` at it.
 | --- | --- | --- |
 | Linux | `packaging/linux/build-deb.sh` (after `cargo build --release`) | `dist/webby_<version>_<arch>.deb` |
 | macOS | `packaging/macos/build-dmg.sh` | `dist/webby-<version>-macos.dmg` |
-| Windows | Inno Setup with `packaging/windows/webby.iss` | `webby-<version>-windows-x64-setup.exe` |
+| Windows | `scripts/package-windows.ps1` (needs a WebKit build and Inno Setup 6) | `dist/webby-<version>-windows-x64-setup.exe` |
 
-CI builds all three on every push and attaches them to the workflow run.
-Pushing a tag such as `v0.1.0` publishes them as a GitHub release.
+CI builds the macOS and Linux installers on every push and attaches them
+to the workflow run. Pushing a tag such as `v0.1.0` publishes them as a
+GitHub release. The Windows installer is built on the build machine,
+with webby's own WebKit, and added to the release by hand.
 
 ## How it works
 
@@ -189,6 +198,7 @@ caused it.
 - Permission prompts (camera, location, notifications)
 - Error pages and JavaScript dialogs (`alert`, `confirm`) on macOS and
   Windows
+- Encrypted (DRM) video on Windows
 - Per-site zoom and content blocking
 - Code signing, and an icon embedded in the Windows executable
 
@@ -197,5 +207,7 @@ caused it.
 webby is open source under the [MIT License](LICENSE).
 
 WebKit itself is a separate project under its own LGPL and BSD licenses.
-The Windows installer bundles a prebuilt WebKit; macOS and Linux use the
-WebKit already provided by the system.
+The Windows installer bundles webby's build of WebKit together with
+GStreamer, FFmpeg and the other libraries it needs, each under its own
+licence; their texts are installed in the `licenses` folder. macOS and
+Linux use the WebKit already provided by the system.

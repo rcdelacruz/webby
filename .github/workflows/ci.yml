@@ -14,11 +14,14 @@ on:
         default: false
 
 jobs:
+  # macOS and Linux only. The Windows build needs webby's own WebKit, which
+  # is built on the build machine, so its installer is made there too and
+  # added to the release by hand.
   build:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-latest, windows-latest]
+        os: [ubuntu-24.04, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -41,26 +44,13 @@ jobs:
         if: runner.os == 'macOS'
         run: packaging/macos/build-dmg.sh
 
-      - name: Package (setup .exe)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Path stage | Out-Null
-          Copy-Item target\release\webby.exe stage\
-          .\scripts\fetch-webkit-windows.ps1 -Destination stage
-          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value
-          choco install innosetup -y --no-progress
-          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DVersion=$version" "/DSourceDir=$PWD\stage" packaging\windows\webby.iss
-          New-Item -ItemType Directory -Path dist -Force | Out-Null
-          Move-Item dist-installer\*.exe dist\
-
       - uses: actions/upload-artifact@v4
         with:
           name: webby-${{ runner.os }}
           path: dist/*
           if-no-files-found: error
 
-  # Publishes the installers as a GitHub release. Runs when a tag like
+  # Publishes the macOS and Linux installers as a GitHub release. Runs when a tag like
   # v0.1.0 is pushed, or when the workflow is started by hand with the
   # "release" box ticked (the release then creates the tag itself).
   release:
