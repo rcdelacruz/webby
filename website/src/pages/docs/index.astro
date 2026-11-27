@@ -1,0 +1,44 @@
+---
+import { getCollection } from "astro:content";
+import Base from "../../layouts/Base.astro";
+
+const docs = (await getCollection("docs")).sort((a, b) => a.data.order - b.data.order);
+---
+
+<Base title="Docs: webby" description="How to install, use and build webby.">
+  <section class="page-head">
+    <div class="wrap">
+      <p class="label">Docs</p>
+      <h1>Using and building webby</h1>
+      <p class="sub">webby is small, and so are its docs. Six short pages cover installing it, using it, and how it is put together.</p>
+    </div>
+  </section>
+  <section class="page-body">
+    <div class="wrap">
+      <div class="grid cols-3">
+      {
+        docs.map((doc, index) => (
+          <a class="cell" href={`/docs/${doc.id}/`}>
+            <span class="n">{String(index + 1).padStart(2, "0")}</span>
+            <h2>{doc.data.title}</h2>
+            <p>{doc.data.description}</p>
+          </a>
+        ))
+      }
+      </div>
+    </div>
+  </section>
+</Base>
+
+<style>
+  .cell {
+    transition: background-color 0.15s ease;
+  }
+  .cell:hover {
+    background: var(--surface);
+  }
+  h2 {
+    font-size: 1.2rem;
+    letter-spacing: -0.025em;
+  }
+</style>

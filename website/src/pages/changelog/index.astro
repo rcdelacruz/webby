@@ -1,0 +1,35 @@
+---
+import { render } from "astro:content";
+import Base from "../../layouts/Base.astro";
+import { allReleases, anchor, longDate } from "../../data/releases";
+
+const releases = await Promise.all((await allReleases()).map(async release => ({ release, Content: (await render(release)).Content })));
+---
+
+<Base title="Changelog: webby" description="What changed in each release of webby.">
+  <section class="page-head">
+    <div class="wrap">
+      <p class="label">Changelog</p>
+      <h1>What changed, release by release</h1>
+    </div>
+  </section>
+  <section class="page-body">
+    <div class="wrap">
+      {
+        releases.map(({ release, Content }) => (
+          <article class="release" id={anchor(release)}>
+            <div class="release-meta">
+              <h2>{release.data.version}</h2>
+              <span class="chip">{release.data.channel}</span>
+              <time datetime={release.data.date.toISOString().slice(0, 10)}>{longDate(release.data.date)}</time>
+            </div>
+            <div class="prose">
+              <p class="summary">{release.data.summary}</p>
+              <Content />
+            </div>
+          </article>
+        ))
+      }
+    </div>
+  </section>
+</Base>

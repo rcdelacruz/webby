@@ -1,0 +1,41 @@
+---
+import Icon from "./Icon.astro";
+import { LATEST, PLATFORMS } from "../data/site";
+---
+
+<div class="grid cols-3 platforms">
+  {
+    PLATFORMS.map(platform => (
+      <article class="platform" data-os={platform.key}>
+        <div class="ico">
+          <Icon name={platform.key} />
+        </div>
+        <h3>
+          {platform.name} <span class="yours">Your system</span>
+        </h3>
+        <p>{platform.blurb}</p>
+        <dl>
+          <div>
+            <dt>Engine</dt>
+            <dd>{platform.engine}</dd>
+          </div>
+          <div>
+            <dt>Runs on</dt>
+            <dd>{platform.requires}</dd>
+          </div>
+          <div>
+            <dt>State</dt>
+            <dd>{platform.status}</dd>
+          </div>
+        </dl>
+        <a class="btn btn-block" data-asset={platform.key} href={LATEST} rel="noopener">
+          <Icon name="download" /> Download {platform.file}
+        </a>
+      </article>
+    ))
+  }
+</div>
+<p class="note">
+  <strong>Before you install:</strong> webby is an alpha and the installers are not code signed yet. Windows SmartScreen will ask you to confirm (More info, then Run anyway). On macOS, approve the first launch
+  under System Settings → Privacy &amp; Security → Open Anyway. <a href="/docs/install/">Install steps in full</a>.
+</p>

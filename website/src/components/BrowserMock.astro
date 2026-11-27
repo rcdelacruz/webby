@@ -1,0 +1,280 @@
+---
+// A drawing of webby's window on Windows, made with the colours and sizes
+// of the browser's own toolbar (crates/core/ui/chrome.html) and start page
+// (crates/core/src/startpage.rs). It follows the visitor's light or dark
+// appearance, as webby does, and stays sharp at any size: every length is
+// a multiple of --u, which is one pixel when the window is 1000 wide.
+const tabs = ["Rust Programming Language", "New Tab", "WebKit"];
+const sites = ["WebKit", "Rust", "Wikipedia", "DuckDuckGo"];
+---
+
+<figure class="mock" role="img" aria-label="webby's window: a tab strip, an address bar, and the start page with a search box and frequently visited sites.">
+  <div class="win" aria-hidden="true">
+    <div class="title">
+      <img src="/favicon.svg" alt="" />
+      <span>New Tab — webby</span>
+      <div class="ctl">
+        <svg viewBox="0 0 10 10"><path d="M1 5h8"></path></svg>
+        <svg viewBox="0 0 10 10"><rect x="1.500" y="1.500" width="7" height="7"></rect></svg>
+        <svg viewBox="0 0 10 10"><path d="M1.500 1.500l7 7M8.500 1.500l-7 7"></path></svg>
+      </div>
+    </div>
+    <div class="strip">
+      {
+        tabs.map((tab, index) => (
+          <div class:list={["tab", { active: index === 1 }]}>
+            <span>{tab}</span>
+            <svg viewBox="0 0 10 10">
+              <path d="M2 2l6 6M8 2l-6 6" />
+            </svg>
+          </div>
+        ))
+      }
+      <svg class="new" viewBox="0 0 16 16"><path d="M8 3v10M3 8h10"></path></svg>
+    </div>
+    <div class="bar">
+      <svg class="off" viewBox="0 0 16 16"><path d="M10 3L5 8l5 5"></path></svg>
+      <svg class="off" viewBox="0 0 16 16"><path d="M6 3l5 5-5 5"></path></svg>
+      <svg viewBox="0 0 16 16"><path d="M13 8a5 5 0 11-1.500-3.500M13 2.500v3h-3"></path></svg>
+      <div class="field"><i class="caret"></i>Search or enter address</div>
+    </div>
+    <div class="page">
+      <img class="logo" src="/wordmark.svg" alt="" />
+      <div class="search">Search the web</div>
+      <p>Frequently visited</p>
+      <div class="tiles">
+        {
+          sites.map(site => (
+            <div class="tile">
+              <b>{site[0]}</b>
+              <span>{site}</span>
+            </div>
+          ))
+        }
+      </div>
+    </div>
+  </div>
+</figure>
+
+<style>
+  .mock {
+    --strip: #e4e4e1;
+    --bar: #f6f6f4;
+    --fg: #1d1d1f;
+    --dim: #6e6e73;
+    --field: #fff;
+    --edge: #cfcfcb;
+    --blue: #0a6cff;
+    --page: #f6f6f4;
+    --card: #fff;
+    --card-edge: #d9d9d6;
+    --titlebar: #ececea;
+    position: relative;
+    margin: 0 auto;
+    padding: 1px 1px 0;
+    max-width: 1000px;
+    container-type: inline-size;
+    -webkit-mask-image: linear-gradient(#000 82%, transparent);
+    mask-image: linear-gradient(#000 82%, transparent);
+  }
+  @media (prefers-color-scheme: dark) {
+    .mock {
+      --strip: #09090b;
+      --bar: #17171b;
+      --fg: #f4f4f5;
+      --dim: #8a8c97;
+      --field: #09090b;
+      --edge: #2a2a31;
+      --blue: #4c9bff;
+      --page: #09090b;
+      --card: #141418;
+      --card-edge: #26262d;
+      --titlebar: #1f1f1f;
+    }
+  }
+  .win {
+    --u: 0.1cqw;
+    font: calc(13 * var(--u)) / 1 system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: var(--fg);
+    background: var(--page);
+    border-radius: calc(10 * var(--u)) calc(10 * var(--u)) 0 0;
+    overflow: hidden;
+    box-shadow: var(--frame-shadow);
+    user-select: none;
+  }
+  svg {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    flex: none;
+  }
+  .title {
+    height: calc(32 * var(--u));
+    display: flex;
+    align-items: center;
+    gap: calc(8 * var(--u));
+    padding-left: calc(12 * var(--u));
+    background: var(--titlebar);
+    font-size: calc(12 * var(--u));
+  }
+  .title img {
+    width: calc(15 * var(--u));
+  }
+  .ctl {
+    margin-left: auto;
+    display: flex;
+    color: var(--dim);
+  }
+  .ctl svg {
+    width: calc(46 * var(--u));
+    height: calc(10 * var(--u));
+    stroke-width: 1;
+  }
+  .strip {
+    height: calc(38 * var(--u));
+    display: flex;
+    align-items: flex-end;
+    gap: calc(2 * var(--u));
+    padding: 0 calc(8 * var(--u));
+    background: var(--strip);
+  }
+  .tab {
+    width: calc(220 * var(--u));
+    height: calc(32 * var(--u));
+    display: flex;
+    align-items: center;
+    gap: calc(6 * var(--u));
+    padding: 0 calc(11 * var(--u)) 0 calc(12 * var(--u));
+    border-radius: calc(8 * var(--u)) calc(8 * var(--u)) 0 0;
+    color: var(--dim);
+  }
+  .tab span {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
+    line-height: calc(32 * var(--u));
+    text-align: left;
+  }
+  .tab svg {
+    width: calc(10 * var(--u));
+    height: calc(10 * var(--u));
+    opacity: 0;
+  }
+  .tab.active {
+    background: var(--bar);
+    color: var(--fg);
+  }
+  .tab.active svg {
+    opacity: 1;
+  }
+  .new {
+    width: calc(16 * var(--u));
+    height: calc(16 * var(--u));
+    margin: 0 0 calc(8 * var(--u)) calc(8 * var(--u));
+  }
+  .bar {
+    height: calc(46 * var(--u));
+    display: flex;
+    align-items: center;
+    gap: calc(18 * var(--u));
+    padding: 0 calc(10 * var(--u)) 0 calc(17 * var(--u));
+    background: var(--bar);
+    border-bottom: 1px solid var(--edge);
+  }
+  .bar svg {
+    width: calc(16 * var(--u));
+    height: calc(16 * var(--u));
+  }
+  .bar .off {
+    opacity: 0.3;
+  }
+  .field {
+    flex: 1;
+    height: calc(30 * var(--u));
+    display: flex;
+    align-items: center;
+    padding: 0 calc(10 * var(--u));
+    background: var(--field);
+    border: 1px solid var(--blue);
+    border-radius: calc(8 * var(--u));
+    box-shadow: 0 0 0 calc(3 * var(--u)) color-mix(in srgb, var(--blue) 25%, transparent);
+    color: var(--dim);
+  }
+  .caret {
+    width: 1px;
+    height: calc(15 * var(--u));
+    background: var(--fg);
+    margin-right: calc(1 * var(--u));
+    animation: blink 1.1s steps(1) infinite;
+  }
+  @keyframes blink {
+    50% {
+      opacity: 0;
+    }
+  }
+  .page {
+    width: calc(672 * var(--u));
+    margin: 0 auto;
+    padding: calc(62 * var(--u)) 0 calc(120 * var(--u));
+    text-align: left;
+  }
+  .logo {
+    width: calc(250 * var(--u));
+    margin: 0 auto calc(30 * var(--u));
+  }
+  .search {
+    padding: calc(15 * var(--u)) calc(18 * var(--u));
+    font-size: calc(15 * var(--u));
+    color: var(--dim);
+    background: var(--card);
+    border: 1px solid var(--card-edge);
+    border-radius: calc(12 * var(--u));
+  }
+  p {
+    font-size: calc(12 * var(--u));
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--dim);
+    margin: calc(44 * var(--u)) 0 calc(12 * var(--u));
+  }
+  .tiles {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: calc(10 * var(--u));
+  }
+  .tile {
+    display: flex;
+    align-items: center;
+    gap: calc(10 * var(--u));
+    padding: calc(10 * var(--u)) calc(12 * var(--u));
+    background: var(--card);
+    border: 1px solid var(--card-edge);
+    border-radius: calc(10 * var(--u));
+  }
+  .tile b {
+    flex: none;
+    width: calc(28 * var(--u));
+    height: calc(28 * var(--u));
+    border-radius: calc(7 * var(--u));
+    background: var(--blue);
+    color: #fff;
+    display: grid;
+    place-items: center;
+    font-weight: 600;
+  }
+  .tile span {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .caret {
+      animation: none;
+    }
+  }
+</style>

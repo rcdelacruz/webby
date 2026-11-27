@@ -1,0 +1,22 @@
+---
+// Line icons, drawn on a 24 by 24 grid. Stroke and size come from CSS.
+const PATHS = {
+  tabs: "M3 9a2 2 0 012-2h4l2 2h8a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2z",
+  search: "M17 11a6 6 0 11-12 0 6 6 0 0112 0zM20 20l-4.500-4.500",
+  restore: "M4 12a8 8 0 108-8M4 5v4h4M12 8v4l3 2",
+  moon: "M12 3a9 9 0 100 18 7 7 0 010-18z",
+  keyboard: "M5 6h14a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2zM7 10h.01M11 10h.01M15 10h.01M8 14h8",
+  shield: "M12 3l7 3v5c0 4.500-3 8-7 10-4-2-7-5.500-7-10V6zM9 12l2 2 4-4",
+  windows: "M4 5.500l7-1v7H4zM13 4.200l7-1.200v8.500h-7zM4 13.500h7v7l-7-1zM13 13.500h7V22l-7-1.200z",
+  macos: "M5 6a2 2 0 012-2h10a2 2 0 012 2v9H5zM3 18h18",
+  linux: "M5 4h14a2 2 0 012 2v12a2 2 0 01-2 2H5a2 2 0 01-2-2V6a2 2 0 012-2zM7 9l3 3-3 3M12 15h5",
+  download: "M12 4v11m0 0l-4.500-4.500M12 15l4.500-4.500M5 20h14",
+} as const;
+
+interface Props {
+  name: keyof typeof PATHS;
+}
+const { name } = Astro.props;
+---
+
+<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d={PATHS[name]}></path></svg>

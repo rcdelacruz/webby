@@ -1,0 +1,28 @@
+---
+import Base from "../layouts/Base.astro";
+import Platforms from "../components/Platforms.astro";
+import { RELEASES } from "../data/site";
+import { allReleases, anchor } from "../data/releases";
+
+const [latest] = await allReleases();
+const { version, channel } = latest.data;
+---
+
+<Base title="Download webby" description="Download webby for Windows, macOS or Linux. Free and open source.">
+  <section class="page-head">
+    <div class="wrap">
+      <p class="label">Download</p>
+      <h1>Get webby</h1>
+      <p class="sub">
+        The current release is <strong>v<span data-version>{version}</span> {channel}</strong>. It is free and open source. <a href={`/changelog/#${anchor(latest)}`}>See what changed</a>, or browse
+        <a href={RELEASES} rel="noopener">every release on GitHub</a>.
+      </p>
+    </div>
+  </section>
+  <section class="page-body">
+    <div class="wrap">
+      <Platforms />
+    </div>
+  </section>
+</Base>
+

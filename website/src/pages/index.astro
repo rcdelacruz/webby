@@ -1,0 +1,204 @@
+---
+import Base from "../layouts/Base.astro";
+import Icon from "../components/Icon.astro";
+import Platforms from "../components/Platforms.astro";
+import BrowserMock from "../components/BrowserMock.astro";
+import Visual from "../components/Visual.astro";
+import { GITHUB, LATEST } from "../data/site";
+import { allReleases, anchor } from "../data/releases";
+
+const [latest] = await allReleases();
+const { version, channel, highlights } = latest.data;
+
+const facts = [
+  { figure: "1", text: "engine on every system: WebKit" },
+  { figure: "3", text: "desktop platforms, one codebase" },
+  { figure: "2,200", text: "lines of Rust, give or take" },
+  { figure: "0", text: "telemetry, accounts or ads" },
+];
+
+const features = [
+  { icon: "tabs", title: "Tabs that behave", text: "Open, close and switch tabs with the mouse or the keyboard. Pop-ups and new-window links open as a tab right next to the page that asked for them." },
+  { icon: "search", title: "One smart address bar", text: "Type a link, a bare site name like example.com, or just what you are looking for. webby works out which, and searches with DuckDuckGo." },
+  { icon: "restore", title: "Picks up where you left off", text: "Your tabs come back when you reopen webby, and the start page keeps the sites you visit most one click away." },
+  { icon: "moon", title: "Light and dark", text: "The whole browser, start page included, follows your system appearance without a setting to hunt for." },
+  { icon: "keyboard", title: "Keyboard first", text: "New tab, close tab, jump to the address bar, reload, back, forward and tab switching all have the shortcuts your hands already know." },
+  { icon: "shield", title: "Yours, and only yours", text: "No sign-in, no telemetry, no sponsored tiles. History and your open tabs are plain files on your own disk." },
+] as const;
+
+const roadmap = [
+  "Downloads and bookmarks",
+  "Find in page and a history view",
+  "Private windows",
+  "Permission prompts for camera, location and notifications",
+  "Content blocking and per-site zoom",
+  "Signed installers",
+];
+---
+
+<Base
+  title="webby: the WebKit browser for Windows, macOS and Linux"
+  description="webby is a small open-source web browser written in Rust. It renders with WebKit, the engine behind Safari, on Windows, macOS and Linux."
+>
+  <section class="hero">
+    <div class="wrap hero-copy">
+      <a class="chip" href={`/changelog/#${anchor(latest)}`}>
+        <span class="dot"></span>
+        <span>v<span data-version>{version}</span> {channel}</span>
+        <span class="sep"></span>
+        <span class="go">What's new →</span>
+      </a>
+      <h1>The web on WebKit.<br /><em>On every desktop.</em></h1>
+      <p class="lede">webby is a small browser written in Rust. It brings the engine behind Safari to Windows, and runs on macOS and Linux too. No Chromium inside.</p>
+      <div class="cta">
+        <a class="btn btn-primary" data-download href={LATEST} rel="noopener"><Icon name="download" /> <span data-download-label>Download webby</span></a>
+        <a class="btn btn-ghost" href="/download/">All downloads</a>
+      </div>
+      <p class="fine">Free and open source. Windows 10+, macOS 11+, Debian and Ubuntu.</p>
+    </div>
+    <div class="wrap stage">
+      <BrowserMock />
+    </div>
+  </section>
+
+  <section class="facts" aria-label="At a glance">
+    <div class="wrap">
+      {
+        facts.map(fact => (
+          <div>
+            <b>{fact.figure}</b>
+            <span>{fact.text}</span>
+          </div>
+        ))
+      }
+    </div>
+  </section>
+
+  {
+    highlights.length > 0 && (
+      <section class="section" id="new">
+        <div class="wrap">
+          <div class="head reveal">
+            <p class="label">New in {version}</p>
+            <h2>{latest.data.headline ?? `What changed in ${version}.`}</h2>
+            <p class="sub">{latest.data.summary}</p>
+          </div>
+          <div class="bento">
+            {highlights.map(item => (
+              <article class:list={["panel", "reveal", item.visual]}>
+                {item.visual && <Visual kind={item.visual} />}
+                <div class="text">
+                  <h3>{item.title}</h3>
+                  <p>{item.text}</p>
+                </div>
+              </article>
+            ))}
+          </div>
+          <a class="more" href={`/changelog/#${anchor(latest)}`}>Read the {version} release notes</a>
+        </div>
+      </section>
+    )
+  }
+
+  <section class="section" id="features">
+    <div class="wrap">
+      <div class="head reveal">
+        <p class="label">Features</p>
+        <h2>Everything you need to browse. <em>Nothing you have to turn off.</em></h2>
+      </div>
+      <div class="grid cols-3 reveal">
+        {
+          features.map(feature => (
+            <article class="cell">
+              <div class="ico">
+                <Icon name={feature.icon} />
+              </div>
+              <h3>{feature.title}</h3>
+              <p>{feature.text}</p>
+            </article>
+          ))
+        }
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="platforms">
+    <div class="wrap">
+      <div class="head reveal">
+        <p class="label">Download</p>
+        <h2>The same engine, <em>wherever you work.</em></h2>
+        <p class="sub">Most browsers are Chromium underneath. webby uses WebKit on all three systems, so you can use and test the engine that powers Safari without owning a Mac.</p>
+      </div>
+      <div class="reveal"><Platforms /></div>
+    </div>
+  </section>
+
+  <section class="section" id="how">
+    <div class="wrap split">
+      <div class="reveal">
+        <div class="head">
+          <p class="label">How it works</p>
+          <h2>One small core. <em>Three thin shells.</em></h2>
+          <p class="sub">
+            All of the browser's behaviour lives in a platform-independent Rust core: tabs, the address bar, history and session restore. Each system adds only a thin layer that opens windows and hosts
+            its native WebKit.
+          </p>
+        </div>
+        <ul class="checks">
+          <li>The toolbar is one HTML document shared by every platform.</li>
+          <li>Web pages can never reach the browser's controls: only the toolbar has that channel.</li>
+          <li>The core is covered by unit tests and has no platform code at all.</li>
+        </ul>
+        <a class="more" href="/docs/architecture/">Read how it works</a>
+      </div>
+      <div class="diagram reveal" role="img" aria-label="Diagram: the shared Rust core connects through one interface, the Shell trait, to three platform backends, each using its native WebKit.">
+        <div class="node core"><b>webby core</b><span>tabs · address bar · history · session</span></div>
+        <div class="wire"></div>
+        <span class="trait">Shell trait</span>
+        <div class="wire"></div>
+        <div class="shells">
+          <div class="node"><b>Windows</b><span>WebKit2.dll</span></div>
+          <div class="node"><b>macOS</b><span>System WebKit</span></div>
+          <div class="node"><b>Linux</b><span>WebKitGTK</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="open-source">
+    <div class="wrap">
+      <div class="head reveal">
+        <p class="label">Open source</p>
+        <h2>Built in the open. <em>Small enough to understand.</em></h2>
+        <p class="sub">webby is developed on GitHub. Read the code, build it yourself, report what breaks, or pick something from the roadmap.</p>
+      </div>
+      <div class="grid cols-2 oss reveal">
+        <div class="cell roadmap">
+          <h3>On the roadmap</h3>
+          <ul>
+            {roadmap.map(item => <li>{item}</li>)}
+          </ul>
+        </div>
+        <div class="cell">
+          <h3>Build it yourself</h3>
+          <pre><code>{`git clone ${GITHUB}\ncd webby\ncargo run --release`}</code></pre>
+          <p>
+            You need Rust 1.88 or newer. On Linux, install GTK 4 and WebKitGTK 6.0 first; on Windows, one script fetches WebKit. <a href="/docs/build/">Build instructions</a>.
+          </p>
+          <div class="cta">
+            <a class="btn btn-primary" href={GITHUB} rel="noopener">View on GitHub</a>
+            <a class="btn btn-ghost" href={`${GITHUB}/issues`} rel="noopener">Report an issue</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="final">
+    <div class="wrap">
+      <h2>Try a different engine.</h2>
+      <p>Free, open source, and no Chromium inside.</p>
+      <a class="btn btn-primary" data-download href={LATEST} rel="noopener"><Icon name="download" /> <span data-download-label>Download webby</span></a>
+    </div>
+  </section>
+</Base>

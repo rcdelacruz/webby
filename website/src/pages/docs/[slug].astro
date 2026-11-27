@@ -1,0 +1,39 @@
+---
+import { getCollection, render } from "astro:content";
+import Base from "../../layouts/Base.astro";
+
+export async function getStaticPaths() {
+  const docs = (await getCollection("docs")).sort((a, b) => a.data.order - b.data.order);
+  return docs.map((doc, index) => ({
+    params: { slug: doc.id },
+    props: { doc, docs, previous: docs[index - 1], next: docs[index + 1] },
+  }));
+}
+
+const { doc, docs, previous, next } = Astro.props;
+const { Content } = await render(doc);
+---
+
+<Base title={`${doc.data.title}: webby docs`} description={doc.data.description}>
+  <section class="page-head">
+    <div class="wrap">
+      <p class="label">Docs</p>
+      <h1>{doc.data.title}</h1>
+      <p class="sub">{doc.data.description}</p>
+    </div>
+  </section>
+  <section class="page-body">
+    <div class="wrap docs">
+      <nav class="docs-nav" aria-label="Docs">
+        {docs.map(item => <a href={`/docs/${item.id}/`} aria-current={item.id === doc.id ? "page" : undefined}>{item.data.title}</a>)}
+      </nav>
+      <div>
+        <div class="prose"><Content /></div>
+        <div class="pager">
+          <span>{previous && <a href={`/docs/${previous.id}/`}>← {previous.data.title}</a>}</span>
+          <span>{next && <a href={`/docs/${next.id}/`}>{next.data.title} →</a>}</span>
+        </div>
+      </div>
+    </div>
+  </section>
+</Base>

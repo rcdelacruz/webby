@@ -1,0 +1,246 @@
+---
+// Small pictures for the "New in" panels on the home page. Each shows
+// figures from that release's notes; none of them is decoration.
+interface Props {
+  kind: "media" | "fps" | "scroll" | "scale";
+}
+const { kind } = Astro.props;
+
+const media = [
+  ["YouTube (Media Source)", true],
+  ["HLS streams", true],
+  ["Web Audio", true],
+  ["Dolby Digital Plus 5.1", true],
+  ["H.264 in MP4", true],
+  ["Encrypted (DRM) video", false],
+] as const;
+
+const fps = [
+  { clip: "1080p60", value: 59.8 },
+  { clip: "4K60 VP9", value: 59.1 },
+];
+
+// Milliseconds between screen updates while scrolling. "Before" spans the
+// 25 to 80 ms that was measured; "now" is one update every 16.7 ms.
+const before = [33, 80, 25, 58, 30, 72, 27, 64, 31];
+const now = Array.from({ length: 25 }, () => 16.7);
+---
+
+<div class:list={["visual", kind]} aria-hidden="true">
+  {
+    kind === "media" && (
+      <div class="rows">
+        {media.map(([name, plays]) => (
+          <div class:list={["row", { no: !plays }]}>
+            <span>{name}</span>
+            <i />
+            <b>{plays ? "plays" : "not yet"}</b>
+          </div>
+        ))}
+      </div>
+    )
+  }
+  {
+    kind === "fps" && (
+      <div class="meters">
+        {fps.map(item => (
+          <div class="meter">
+            <div class="figure">
+              <strong>{item.value}</strong>
+              <span>of 60 frames a second</span>
+            </div>
+            <div class="track">
+              <i style={`width:${(item.value / 60) * 100}%`} />
+            </div>
+            <span class="clip">{item.clip}</span>
+          </div>
+        ))}
+      </div>
+    )
+  }
+  {
+    kind === "scroll" && (
+      <div class="pacing">
+        <div class="lane">
+          <span>Before</span>
+          <div class="ticks uneven">
+            {before.map(ms => (
+              <i style={`flex-grow:${ms}`} />
+            ))}
+          </div>
+          <b>25–80 ms</b>
+        </div>
+        <div class="lane">
+          <span>0.1.1</span>
+          <div class="ticks even">
+            {now.map(ms => (
+              <i style={`flex-grow:${ms}`} />
+            ))}
+          </div>
+          <b>16.7 ms</b>
+        </div>
+        <p>Time between screen updates while scrolling. Each mark is one update.</p>
+      </div>
+    )
+  }
+  {
+    kind === "scale" && (
+      <div class="scales">
+        {[100, 125, 150].map(percent => (
+          <div class="scale">
+            <svg viewBox="0 0 48 48">
+              <circle cx="24" cy="24" r="15" />
+              <circle cx="24" cy="24" r="6" />
+              <path class="hit" d="M24 24l9 20 2.500-8.500 8.500-2.500z" />
+            </svg>
+            <span>{percent}%</span>
+          </div>
+        ))}
+      </div>
+    )
+  }
+</div>
+
+<style>
+  .visual {
+    --bar: linear-gradient(90deg, #38b6ff, #2a5fe8);
+    font: 500 0.78rem/1.2 var(--mono);
+    color: var(--muted);
+    min-height: 196px;
+    display: grid;
+    align-content: center;
+  }
+
+  /* media */
+  .rows {
+    display: grid;
+  }
+  .row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 9px 0;
+    border-top: 1px solid var(--line);
+    color: var(--ink-2);
+  }
+  .row:first-child {
+    border-top: 0;
+  }
+  .row i {
+    flex: 1;
+    border-top: 1px dotted var(--line-strong);
+  }
+  .row b {
+    font-weight: 500;
+    color: var(--accent);
+  }
+  .row.no,
+  .row.no b {
+    color: var(--muted);
+  }
+
+  /* fps */
+  .meters {
+    display: grid;
+    gap: 26px;
+  }
+  .meter {
+    display: grid;
+    gap: 10px;
+  }
+  .figure {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+  .figure strong {
+    font: 600 2.6rem/1 var(--sans);
+    letter-spacing: -0.05em;
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
+  }
+  .track {
+    height: 6px;
+    border-radius: 6px;
+    background: var(--line);
+    overflow: hidden;
+  }
+  .track i {
+    display: block;
+    height: 100%;
+    border-radius: 6px;
+    background: var(--bar);
+  }
+  .clip {
+    color: var(--ink-2);
+  }
+
+  /* scroll */
+  .pacing {
+    display: grid;
+    gap: 18px;
+  }
+  .lane {
+    display: grid;
+    grid-template-columns: 52px minmax(0, 1fr) 76px;
+    align-items: center;
+    gap: 14px;
+  }
+  .lane b {
+    font-weight: 500;
+    text-align: right;
+    color: var(--ink-2);
+  }
+  .ticks {
+    display: flex;
+    height: 34px;
+  }
+  .ticks i {
+    flex-basis: 0;
+    border-left: 2px solid var(--line-strong);
+  }
+  .ticks i:last-child {
+    border-right: 2px solid var(--line-strong);
+  }
+  .ticks.even i {
+    border-color: #2f8ef0;
+  }
+  .lane:has(.even) b {
+    color: var(--accent);
+  }
+  .pacing p {
+    font: 400 0.8rem/1.5 var(--sans);
+    color: var(--muted);
+  }
+
+  /* scale */
+  .scales {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 12px;
+    text-align: center;
+  }
+  .scale {
+    display: grid;
+    gap: 12px;
+    justify-items: center;
+    color: var(--ink-2);
+  }
+  .scale svg {
+    width: 100%;
+    max-width: 84px;
+    fill: none;
+    stroke: var(--line-strong);
+    stroke-width: 1.2;
+  }
+  .scale circle:nth-child(2) {
+    fill: #2f8ef0;
+    stroke: none;
+  }
+  .scale .hit {
+    fill: var(--ink);
+    stroke: var(--bg);
+    stroke-width: 1.5;
+    stroke-linejoin: round;
+  }
+</style>
